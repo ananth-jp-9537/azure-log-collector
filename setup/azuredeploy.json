@@ -5,24 +5,10 @@
     "description": "Site24x7 Azure Diagnostic Logs Collection — deploys a Function App that auto-discovers resources, configures diagnostic settings, and streams logs to Site24x7 AppLogs via per-region Storage Accounts."
   },
   "parameters": {
-    "location": {
-      "type": "string",
-      "metadata": {
-        "description": "Azure region for the deployment."
-      }
-    },
-    "subscriptionIds": {
-      "type": "string",
-      "defaultValue": "",
-      "metadata": {
-        "description": "Comma-separated Azure subscription IDs to monitor. Configure after deployment in Function App → Configuration → SUBSCRIPTION_IDS."
-      }
-    },
-    "site24x7ApiToken": {
+    "site24x7DeviceKey": {
       "type": "securestring",
-      "defaultValue": "",
       "metadata": {
-        "description": "Site24x7 API token for AppLogs integration."
+        "description": "Site24x7 Device Key for AppLogs integration. Found in Site24x7 → Admin → Developer → Device Key."
       }
     },
     "site24x7Domain": {
@@ -55,7 +41,7 @@
     "storageAccountName": "[concat('s247diag', variables('uniqueSuffix'))]",
     "functionAppName": "[concat('s247-diag-func-', variables('uniqueSuffix'))]",
     "diagStorageSuffix": "[variables('uniqueSuffix')]",
-    "seedStorageName": "[take(concat('s247diag', replace(replace(parameters('location'), ' ', ''), '-', ''), variables('uniqueSuffix')), 24)]",
+    "seedStorageName": "[take(concat('s247diag', replace(replace(deployment().location, ' ', ''), '-', ''), variables('uniqueSuffix')), 24)]",
     "hostingPlanName": "[concat('s247-diag-func-', variables('uniqueSuffix'), '-plan')]",
     "appInsightsName": "[concat('s247-diag-func-', variables('uniqueSuffix'), '-ai')]",
     "functionZipUrl": "https://github.com/ananth-jp-9537/azure-log-collector/releases/latest/download/s247-function-app.zip",
@@ -67,7 +53,7 @@
       "type": "Microsoft.Resources/resourceGroups",
       "apiVersion": "2022-09-01",
       "name": "[variables('rgName')]",
-      "location": "[parameters('location')]",
+      "location": "[deployment().location]",
       "tags": {
         "managed-by": "s247-diag-logs",
         "purpose": "diagnostic-logs-collection"
@@ -87,15 +73,15 @@
           "scope": "inner"
         },
         "parameters": {
-          "location": { "value": "[parameters('location')]" },
+          "location": { "value": "[deployment().location]" },
           "storageAccountName": { "value": "[variables('storageAccountName')]" },
           "seedStorageName": { "value": "[variables('seedStorageName')]" },
           "functionAppName": { "value": "[variables('functionAppName')]" },
           "hostingPlanName": { "value": "[variables('hostingPlanName')]" },
           "appInsightsName": { "value": "[variables('appInsightsName')]" },
           "rgName": { "value": "[variables('rgName')]" },
-          "subscriptionIds": { "value": "[parameters('subscriptionIds')]" },
-          "site24x7ApiToken": { "value": "[parameters('site24x7ApiToken')]" },
+          "subscriptionIds": { "value": "[subscription().subscriptionId]" },
+          "site24x7DeviceKey": { "value": "[parameters('site24x7DeviceKey')]" },
           "generalLogTypeEnabled": { "value": "[parameters('generalLogTypeEnabled')]" },
           "site24x7Domain": { "value": "[parameters('site24x7Domain')]" },
           "diagStorageSuffix": { "value": "[variables('diagStorageSuffix')]" },
@@ -113,7 +99,7 @@
             "appInsightsName": { "type": "string" },
             "rgName": { "type": "string" },
             "subscriptionIds": { "type": "string" },
-            "site24x7ApiToken": { "type": "securestring" },
+            "site24x7DeviceKey": { "type": "securestring" },
             "generalLogTypeEnabled": { "type": "string" },
             "site24x7Domain": { "type": "string" },
             "diagStorageSuffix": { "type": "string" },
@@ -218,7 +204,7 @@
                       "value": "[reference(resourceId('Microsoft.Insights/components', parameters('appInsightsName')), '2020-02-02').InstrumentationKey]"
                     },
                     { "name": "SUBSCRIPTION_IDS", "value": "[parameters('subscriptionIds')]" },
-                    { "name": "SITE24X7_API_TOKEN", "value": "[parameters('site24x7ApiToken')]" },
+                    { "name": "SITE24X7_API_KEY", "value": "[parameters('site24x7DeviceKey')]" },
                     { "name": "SITE24X7_BASE_URL", "value": "[concat('https://www.', parameters('site24x7Domain'))]" },
                     { "name": "GENERAL_LOGTYPE_ENABLED", "value": "[parameters('generalLogTypeEnabled')]" },
                     { "name": "TIMER_SCHEDULE", "value": "0 0 */6 * * *" },
