@@ -1,0 +1,46 @@
+{
+  "records": [
+    {
+      "time": "2026-03-18T10:31:00.000Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.Web/sites/my-func-app",
+      "operationName": "Microsoft.Web/sites/functions/log",
+      "category": "FunctionAppLogs",
+      "resultType": "",
+      "level": "Information",
+      "properties": {
+        "ActivityId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "ExceptionDetails": "",
+        "ExceptionMessage": "",
+        "ExceptionType": "",
+        "FunctionInvocationId": "inv-001-abc",
+        "FunctionName": "BlobLogProcessor",
+        "HostInstanceId": "host-instance-001",
+        "HostVersion": "4.27.5.1",
+        "Level": "Information",
+        "Message": "BlobLogProcessor executed successfully. Processed 42 blobs.",
+        "ProcessId": 1234
+      }
+    },
+    {
+      "time": "2026-03-18T10:31:15.500Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.Web/sites/my-func-app",
+      "operationName": "Microsoft.Web/sites/functions/log",
+      "category": "FunctionAppLogs",
+      "resultType": "",
+      "level": "Error",
+      "properties": {
+        "ActivityId": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
+        "ExceptionDetails": "System.TimeoutException: The operation has timed out.\n   at Azure.Storage.Blobs.BlobClient.DownloadAsync()",
+        "ExceptionMessage": "The operation has timed out.",
+        "ExceptionType": "System.TimeoutException",
+        "FunctionInvocationId": "inv-002-def",
+        "FunctionName": "DiagSettingsManager",
+        "HostInstanceId": "host-instance-001",
+        "HostVersion": "4.27.5.1",
+        "Level": "Error",
+        "Message": "DiagSettingsManager failed: timeout downloading blob config",
+        "ProcessId": 1234
+      }
+    }
+  ]
+}

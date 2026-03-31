@@ -1,0 +1,8 @@
+azure-functions
+azure-identity
+azure-mgmt-resource
+azure-mgmt-monitor>=8.0.0b1
+azure-mgmt-storage
+azure-mgmt-web
+azure-storage-blob>=12.20.0,<12.28.0
+requests

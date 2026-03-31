@@ -1,0 +1,345 @@
+"""Persistent debug log — ring buffer stored in blob storage.
+
+Captures errors, warnings, and key operational events with timestamps.
+Used by the Debug API and Dashboard to show recent issues without
+requiring Azure Portal / Log Analytics access.
+
+Events are stored as a JSON array in blob storage, capped at MAX_EVENTS.
+Processing stats (BlobLogProcessor runs) are stored separately.
+"""
+
+import json
+import logging
+import os
+import traceback
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+MAX_EVENTS = 200
+EVENTS_BLOB = "debug-events.json"
+PROCESSING_STATS_BLOB = "processing-stats.json"
+MAX_PROCESSING_RUNS = 50
+CONTAINER_NAME = "config"
+
+
+def _get_blob_client(blob_name: str):
+    """Get a blob client for the given blob name."""
+    from azure.storage.blob import BlobServiceClient
+
+    conn_str = os.environ.get("AzureWebJobsStorage", "")
+    if not conn_str:
+        return None
+    service = BlobServiceClient.from_connection_string(conn_str)
+    container = service.get_container_client(CONTAINER_NAME)
+    try:
+        container.create_container()
+    except Exception:
+        pass
+    return container.get_blob_client(blob_name)
+
+
+def _read_events() -> List[Dict]:
+    """Read existing events from blob."""
+    try:
+        client = _get_blob_client(EVENTS_BLOB)
+        if not client:
+            return []
+        data = client.download_blob().readall().decode("utf-8")
+        return json.loads(data)
+    except Exception:
+        return []
+
+
+def _write_events(events: List[Dict]) -> None:
+    """Write events to blob."""
+    try:
+        client = _get_blob_client(EVENTS_BLOB)
+        if client:
+            client.upload_blob(json.dumps(events, indent=2), overwrite=True)
+    except Exception as e:
+        logger.error("debug_logger: Failed to write events: %s", e)
+
+
+def log_event(
+    level: str,
+    component: str,
+    message: str,
+    details: Optional[Dict] = None,
+) -> None:
+    """Log a debug event to persistent storage.
+
+    Args:
+        level: "error", "warning", "info"
+        component: Module name (e.g., "BlobLogProcessor", "DiagSettingsManager")
+        message: Short description of what happened
+        details: Optional dict with additional context (stack trace, resource IDs, etc.)
+    """
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "component": component,
+        "message": message,
+    }
+    if details:
+        event["details"] = details
+
+    try:
+        events = _read_events()
+        events.append(event)
+        # Keep only the last MAX_EVENTS
+        if len(events) > MAX_EVENTS:
+            events = events[-MAX_EVENTS:]
+        _write_events(events)
+    except Exception as e:
+        # Don't let debug logging break the main flow
+        logger.error("debug_logger: Failed to log event: %s", e)
+
+
+def get_recent_events(limit: int = 50, level: Optional[str] = None) -> List[Dict]:
+    """Get recent debug events, newest first.
+
+    Args:
+        limit: Max number of events to return
+        level: Optional filter by level ("error", "warning", "info")
+    """
+    events = _read_events()
+    if level:
+        events = [e for e in events if e.get("level") == level]
+    return list(reversed(events[-limit:]))
+
+
+def clear_events() -> None:
+    """Clear all debug events."""
+    _write_events([])
+
+
+# ─── Processing Stats (BlobLogProcessor run history) ─────────────────────────
+
+
+def save_processing_stats(stats: Dict) -> None:
+    """Save a BlobLogProcessor run summary to the stats ring buffer."""
+    stats["timestamp"] = datetime.now(timezone.utc).isoformat()
+    try:
+        client = _get_blob_client(PROCESSING_STATS_BLOB)
+        if not client:
+            return
+
+        # Read existing
+        runs = []
+        try:
+            data = client.download_blob().readall().decode("utf-8")
+            runs = json.loads(data)
+        except Exception:
+            pass
+
+        runs.append(stats)
+        if len(runs) > MAX_PROCESSING_RUNS:
+            runs = runs[-MAX_PROCESSING_RUNS:]
+
+        client.upload_blob(json.dumps(runs, indent=2), overwrite=True)
+    except Exception as e:
+        logger.error("debug_logger: Failed to save processing stats: %s", e)
+
+
+def get_processing_stats(limit: int = 10) -> List[Dict]:
+    """Get recent BlobLogProcessor run summaries, newest first."""
+    try:
+        client = _get_blob_client(PROCESSING_STATS_BLOB)
+        if not client:
+            return []
+        data = client.download_blob().readall().decode("utf-8")
+        runs = json.loads(data)
+        return list(reversed(runs[-limit:]))
+    except Exception:
+        return []
+
+
+# ─── Config Validation ───────────────────────────────────────────────────────
+
+
+def validate_config() -> List[Dict]:
+    """Check for common configuration issues.
+
+    Returns a list of {level, field, message} dicts.
+    """
+    issues = []
+
+    # Required env vars
+    required = {
+        "SUBSCRIPTION_IDS": "Azure subscription IDs to monitor",
+        "SITE24X7_API_KEY": "Site24x7 device key for API authentication",
+        "SITE24X7_BASE_URL": "Site24x7 data center URL",
+    }
+    for var, desc in required.items():
+        val = os.environ.get(var, "")
+        if not val:
+            issues.append({
+                "level": "error",
+                "field": var,
+                "message": f"Not set — {desc}",
+            })
+        elif var == "SITE24X7_API_KEY" and val in ("vuvuvi", "test", "changeme"):
+            issues.append({
+                "level": "error",
+                "field": var,
+                "message": "Placeholder value — set a real Site24x7 API key",
+            })
+
+    # Storage connection
+    if not os.environ.get("AzureWebJobsStorage"):
+        issues.append({
+            "level": "error",
+            "field": "AzureWebJobsStorage",
+            "message": "Not set — blob storage for configs/state won't work",
+        })
+
+    # Processing state
+    if os.environ.get("PROCESSING_ENABLED", "true").lower() != "true":
+        issues.append({
+            "level": "warning",
+            "field": "PROCESSING_ENABLED",
+            "message": "Log processing is DISABLED — logs are accumulating but not forwarded",
+        })
+
+    # General logtype
+    general_enabled = os.environ.get("GENERAL_LOGTYPE_ENABLED", "false").lower() == "true"
+    if general_enabled and not os.environ.get("S247_GENERAL_LOGTYPE"):
+        issues.append({
+            "level": "warning",
+            "field": "S247_GENERAL_LOGTYPE",
+            "message": "GENERAL_LOGTYPE_ENABLED=true but S247_GENERAL_LOGTYPE is empty — general fallback won't work",
+        })
+
+    # Update URL
+    if not os.environ.get("UPDATE_CHECK_URL"):
+        issues.append({
+            "level": "info",
+            "field": "UPDATE_CHECK_URL",
+            "message": "Not set — set UPDATE_CHECK_URL app setting to enable auto-update checks",
+        })
+
+    return issues
+
+
+# ─── S247 Connectivity Test ──────────────────────────────────────────────────
+
+
+def test_s247_connectivity() -> Dict:
+    """Test connectivity to Site24x7 API endpoints.
+
+    Returns dict with results for each endpoint tested.
+    """
+    import urllib.request
+    import urllib.parse
+    import time
+
+    base_url = os.environ.get("SITE24X7_BASE_URL", "https://www.site24x7.com")
+    device_key = os.environ.get("SITE24X7_API_KEY", "")
+    results = {}
+
+    # Test 1: logtype_supported endpoint
+    try:
+        url = f"{base_url}/applog/azure/logtype_supported?{urllib.parse.urlencode({'deviceKey': device_key})}"
+        start = time.time()
+        req = urllib.request.Request(url)
+        req.add_header("Accept", "application/json")
+        resp = urllib.request.urlopen(req, timeout=15)
+        elapsed_ms = int((time.time() - start) * 1000)
+        body = json.loads(resp.read().decode("utf-8"))
+        results["logtype_supported"] = {
+            "status": "ok",
+            "http_status": resp.status,
+            "response_time_ms": elapsed_ms,
+            "type_count": len(body.get("supported_types", [])),
+        }
+    except Exception as e:
+        results["logtype_supported"] = {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+    # Test 2: logtype endpoint (check a known type)
+    try:
+        url = f"{base_url}/applog/logtype?{urllib.parse.urlencode({'deviceKey': device_key, 'logType': 'auditlogs'})}"
+        start = time.time()
+        req = urllib.request.Request(url)
+        req.add_header("Accept", "application/json")
+        resp = urllib.request.urlopen(req, timeout=15)
+        elapsed_ms = int((time.time() - start) * 1000)
+        body = json.loads(resp.read().decode("utf-8"))
+        results["logtype_check"] = {
+            "status": "ok",
+            "http_status": resp.status,
+            "response_time_ms": elapsed_ms,
+            "api_status": body.get("status"),
+            "api_upload": body.get("apiUpload"),
+        }
+    except Exception as e:
+        results["logtype_check"] = {
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+    # Test 3: Upload domain reachability (just TCP connect, no actual upload)
+    from shared.site24x7_client import Site24x7Client
+    client = Site24x7Client()
+    upload_domain = client._get_upload_domain()
+    try:
+        import socket
+        host = upload_domain.replace("http://", "").replace("https://", "").split("/")[0]
+        port = 443
+        if ":" in host:
+            host, port = host.rsplit(":", 1)
+            port = int(port)
+        elif upload_domain.startswith("http://"):
+            port = 80
+
+        start = time.time()
+        sock = socket.create_connection((host, port), timeout=10)
+        elapsed_ms = int((time.time() - start) * 1000)
+        sock.close()
+        results["upload_endpoint"] = {
+            "status": "ok",
+            "domain": upload_domain,
+            "connect_time_ms": elapsed_ms,
+        }
+    except Exception as e:
+        results["upload_endpoint"] = {
+            "status": "error",
+            "domain": upload_domain,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+    # Flatten into the format the dashboard expects
+    base_url = os.environ.get("SITE24X7_BASE_URL", "https://www.site24x7.com")
+    lt_ok = results.get("logtype_supported", {}).get("status") == "ok"
+    # Fall back to logtype_check if logtype_supported fails (relay may not support it)
+    if not lt_ok:
+        lt_ok = results.get("logtype_check", {}).get("status") == "ok"
+    up_ok = results.get("upload_endpoint", {}).get("status") == "ok"
+    upload_domain = results.get("upload_endpoint", {}).get("domain", "?")
+
+    results["base_url"] = base_url
+    results["upload_domain"] = upload_domain
+    results["logtype_supported_ok"] = lt_ok
+    results["upload_domain_ok"] = up_ok
+    results["logtype_ok"] = results.get("logtype_check", {}).get("status") == "ok"
+
+    # Collect errors for display (skip logtype_supported if logtype_check succeeded)
+    errors = []
+    lt_check_ok = results.get("logtype_check", {}).get("status") == "ok"
+    for key in ("logtype_supported", "logtype_check", "upload_endpoint"):
+        entry = results.get(key, {})
+        if entry.get("status") == "error":
+            if key == "logtype_supported" and lt_check_ok:
+                continue
+            errors.append(f"{key}: {entry.get('error', 'unknown')}")
+    if errors:
+        results["error"] = "; ".join(errors)
+
+    return results

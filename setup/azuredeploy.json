@@ -1,0 +1,305 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Site24x7 Azure Diagnostic Logs Collection — deploys a Function App that auto-discovers resources, configures diagnostic settings, and streams logs to Site24x7 AppLogs via per-region Storage Accounts."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region for the deployment."
+      }
+    },
+    "subscriptionIds": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Comma-separated Azure subscription IDs to monitor. Configure after deployment in Function App → Configuration → SUBSCRIPTION_IDS."
+      }
+    },
+    "site24x7ApiToken": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Site24x7 API token for AppLogs integration."
+      }
+    },
+    "site24x7Domain": {
+      "type": "string",
+      "defaultValue": "site24x7.com",
+      "allowedValues": [
+        "site24x7.com",
+        "site24x7.in",
+        "site24x7.eu",
+        "site24x7.net.au",
+        "site24x7.cn",
+        "site24x7.jp"
+      ],
+      "metadata": {
+        "description": "Site24x7 data center domain based on your account region. US: site24x7.com, IN: site24x7.in, EU: site24x7.eu, AU: site24x7.net.au, CN: site24x7.cn, JP: site24x7.jp"
+      }
+    },
+    "generalLogTypeEnabled": {
+      "type": "string",
+      "defaultValue": "true",
+      "allowedValues": ["true", "false"],
+      "metadata": {
+        "description": "Enable the general catch-all log type for unsupported categories."
+      }
+    }
+  },
+  "variables": {
+    "rgName": "s247-diag-logs-rg",
+    "uniqueSuffix": "[substring(uniqueString(subscription().id, 's247-diag-logs'), 0, 6)]",
+    "storageAccountName": "[concat('s247diag', variables('uniqueSuffix'))]",
+    "functionAppName": "[concat('s247-diag-func-', variables('uniqueSuffix'))]",
+    "diagStorageSuffix": "[variables('uniqueSuffix')]",
+    "seedStorageName": "[take(concat('s247diag', replace(replace(parameters('location'), ' ', ''), '-', ''), variables('uniqueSuffix')), 24)]",
+    "hostingPlanName": "[concat('s247-diag-func-', variables('uniqueSuffix'), '-plan')]",
+    "appInsightsName": "[concat('s247-diag-func-', variables('uniqueSuffix'), '-ai')]",
+    "functionZipUrl": "https://github.com/ananth-jp-9537/azure-log-collector/releases/latest/download/s247-function-app.zip",
+    "readerRoleId": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+    "monitoringContributorRoleId": "749f88d5-cbae-40b8-bcfc-e573ddc772fa"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2022-09-01",
+      "name": "[variables('rgName')]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "managed-by": "s247-diag-logs",
+        "purpose": "diagnostic-logs-collection"
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "s247-diag-logs-resources",
+      "resourceGroup": "[variables('rgName')]",
+      "dependsOn": [
+        "[variables('rgName')]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "location": { "value": "[parameters('location')]" },
+          "storageAccountName": { "value": "[variables('storageAccountName')]" },
+          "seedStorageName": { "value": "[variables('seedStorageName')]" },
+          "functionAppName": { "value": "[variables('functionAppName')]" },
+          "hostingPlanName": { "value": "[variables('hostingPlanName')]" },
+          "appInsightsName": { "value": "[variables('appInsightsName')]" },
+          "rgName": { "value": "[variables('rgName')]" },
+          "subscriptionIds": { "value": "[parameters('subscriptionIds')]" },
+          "site24x7ApiToken": { "value": "[parameters('site24x7ApiToken')]" },
+          "generalLogTypeEnabled": { "value": "[parameters('generalLogTypeEnabled')]" },
+          "site24x7Domain": { "value": "[parameters('site24x7Domain')]" },
+          "diagStorageSuffix": { "value": "[variables('diagStorageSuffix')]" },
+          "functionZipUrl": { "value": "[variables('functionZipUrl')]" }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "location": { "type": "string" },
+            "storageAccountName": { "type": "string" },
+            "seedStorageName": { "type": "string" },
+            "functionAppName": { "type": "string" },
+            "hostingPlanName": { "type": "string" },
+            "appInsightsName": { "type": "string" },
+            "rgName": { "type": "string" },
+            "subscriptionIds": { "type": "string" },
+            "site24x7ApiToken": { "type": "securestring" },
+            "generalLogTypeEnabled": { "type": "string" },
+            "site24x7Domain": { "type": "string" },
+            "diagStorageSuffix": { "type": "string" },
+            "functionZipUrl": { "type": "string" }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-01-01",
+              "name": "[parameters('storageAccountName')]",
+              "location": "[parameters('location')]",
+              "kind": "StorageV2",
+              "sku": { "name": "Standard_LRS" },
+              "properties": {
+                "minimumTlsVersion": "TLS1_2",
+                "allowBlobPublicAccess": false
+              },
+              "tags": {
+                "managed-by": "s247-diag-logs",
+                "purpose": "function-app-runtime"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-01-01",
+              "name": "[parameters('seedStorageName')]",
+              "location": "[parameters('location')]",
+              "kind": "StorageV2",
+              "sku": { "name": "Standard_LRS" },
+              "properties": {
+                "minimumTlsVersion": "TLS1_2",
+                "allowBlobPublicAccess": false
+              },
+              "tags": {
+                "managed-by": "s247-diag-logs",
+                "purpose": "diag-logs-regional",
+                "region": "[parameters('location')]"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-01-01",
+              "name": "[concat(parameters('seedStorageName'), '/default/insights-logs')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('seedStorageName'))]"
+              ],
+              "properties": { "publicAccess": "None" }
+            },
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[parameters('appInsightsName')]",
+              "location": "[parameters('location')]",
+              "kind": "web",
+              "properties": { "Application_Type": "web" },
+              "tags": { "managed-by": "s247-diag-logs" }
+            },
+            {
+              "type": "Microsoft.Web/serverfarms",
+              "apiVersion": "2023-01-01",
+              "name": "[parameters('hostingPlanName')]",
+              "location": "[parameters('location')]",
+              "kind": "linux",
+              "sku": { "name": "Y1", "tier": "Dynamic" },
+              "properties": { "reserved": true },
+              "tags": { "managed-by": "s247-diag-logs" }
+            },
+            {
+              "type": "Microsoft.Web/sites",
+              "apiVersion": "2023-01-01",
+              "name": "[parameters('functionAppName')]",
+              "location": "[parameters('location')]",
+              "kind": "functionapp,linux",
+              "identity": { "type": "SystemAssigned" },
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', parameters('hostingPlanName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]"
+              ],
+              "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('hostingPlanName'))]",
+                "httpsOnly": true,
+                "siteConfig": {
+                  "linuxFxVersion": "python|3.11",
+                  "appSettings": [
+                    {
+                      "name": "AzureWebJobsStorage",
+                      "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';EndpointSuffix=', environment().suffixes.storage, ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value)]"
+                    },
+                    {
+                      "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+                      "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';EndpointSuffix=', environment().suffixes.storage, ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value)]"
+                    },
+                    {
+                      "name": "WEBSITE_CONTENTSHARE",
+                      "value": "[toLower(parameters('functionAppName'))]"
+                    },
+                    { "name": "FUNCTIONS_EXTENSION_VERSION", "value": "~4" },
+                    { "name": "FUNCTIONS_WORKER_RUNTIME", "value": "python" },
+                    {
+                      "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+                      "value": "[reference(resourceId('Microsoft.Insights/components', parameters('appInsightsName')), '2020-02-02').InstrumentationKey]"
+                    },
+                    { "name": "SUBSCRIPTION_IDS", "value": "[parameters('subscriptionIds')]" },
+                    { "name": "SITE24X7_API_TOKEN", "value": "[parameters('site24x7ApiToken')]" },
+                    { "name": "SITE24X7_BASE_URL", "value": "[concat('https://www.', parameters('site24x7Domain'))]" },
+                    { "name": "GENERAL_LOGTYPE_ENABLED", "value": "[parameters('generalLogTypeEnabled')]" },
+                    { "name": "TIMER_SCHEDULE", "value": "0 0 */6 * * *" },
+                    { "name": "RESOURCE_GROUP_NAME", "value": "[parameters('rgName')]" },
+                    { "name": "PROCESSING_ENABLED", "value": "true" },
+                    { "name": "DIAG_STORAGE_SUFFIX", "value": "[parameters('diagStorageSuffix')]" },
+                    { "name": "ENABLE_ORYX_BUILD", "value": "true" },
+                    { "name": "SCM_DO_BUILD_DURING_DEPLOYMENT", "value": "true" },
+                    { "name": "WEBSITE_RUN_FROM_PACKAGE", "value": "[parameters('functionZipUrl')]" }
+                  ]
+                }
+              },
+              "tags": { "managed-by": "s247-diag-logs" }
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "name": "s247-lock-rg",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Managed by s247-diag-logs"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('functionAppName'), 'b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/sites', parameters('functionAppName'))]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c')]",
+                "principalId": "[reference(resourceId('Microsoft.Web/sites', parameters('functionAppName')), '2023-01-01', 'Full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ],
+          "outputs": {
+            "functionAppPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('functionAppName')), '2023-01-01', 'Full').identity.principalId]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, variables('functionAppName'), variables('readerRoleId'))]",
+      "dependsOn": [
+        "s247-diag-logs-resources"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('readerRoleId'))]",
+        "principalId": "[reference('s247-diag-logs-resources').outputs.functionAppPrincipalId.value]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, variables('functionAppName'), variables('monitoringContributorRoleId'))]",
+      "dependsOn": [
+        "s247-diag-logs-resources"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('monitoringContributorRoleId'))]",
+        "principalId": "[reference('s247-diag-logs-resources').outputs.functionAppPrincipalId.value]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ],
+  "outputs": {
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[variables('rgName')]"
+    },
+    "functionAppName": {
+      "type": "string",
+      "value": "[variables('functionAppName')]"
+    }
+  }
+}

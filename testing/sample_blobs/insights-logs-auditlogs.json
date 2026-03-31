@@ -1,0 +1,82 @@
+{
+  "records": [
+    {
+      "time": "2026-03-18T10:30:00.123Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.AAD/domainServices/myaad",
+      "operationName": "Microsoft.AAD/DomainServices/write",
+      "operationVersion": "1.0",
+      "category": "AuditLogs",
+      "resultType": "Success",
+      "resultSignature": "None",
+      "durationMs": 245,
+      "callerIpAddress": "52.168.112.45",
+      "level": "Informational",
+      "properties": {
+        "AADOperationType": "Update",
+        "AADTenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+        "ActivityDisplayName": "Update user",
+        "Id": "Directory_abc123",
+        "LoggedByService": "Core Directory",
+        "Resource": "user@contoso.com",
+        "ResourceGroup": "my-rg",
+        "Result": "success",
+        "ResultDescription": "Successfully updated user properties",
+        "ResultReason": "Initiated by admin",
+        "SourceSystem": "Azure AD",
+        "TargetResources": {"type": "User", "displayName": "John Doe"}
+      }
+    },
+    {
+      "time": "2026-03-18T10:30:05.456Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.AAD/domainServices/myaad",
+      "operationName": "Microsoft.AAD/DomainServices/delete",
+      "operationVersion": "1.0",
+      "category": "AuditLogs",
+      "resultType": "Failure",
+      "resultSignature": "None",
+      "durationMs": 120,
+      "callerIpAddress": "10.0.0.5",
+      "level": "Warning",
+      "properties": {
+        "AADOperationType": "Delete",
+        "AADTenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+        "ActivityDisplayName": "Delete group",
+        "Id": "Directory_def456",
+        "LoggedByService": "Core Directory",
+        "Resource": "test-group",
+        "ResourceGroup": "my-rg",
+        "Result": "failure",
+        "ResultDescription": "Insufficient permissions to delete group",
+        "ResultReason": "Access denied",
+        "SourceSystem": "Azure AD",
+        "TargetResources": {"type": "Group", "displayName": "Test Group"}
+      }
+    },
+    {
+      "time": "2026-03-18T10:30:10.789Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.AAD/domainServices/myaad",
+      "operationName": "Microsoft.AAD/DomainServices/read",
+      "operationVersion": "1.0",
+      "category": "AuditLogs",
+      "resultType": "Success",
+      "resultSignature": "None",
+      "durationMs": 55,
+      "callerIpAddress": "203.0.113.42",
+      "level": "Informational",
+      "properties": {
+        "AADOperationType": "Read",
+        "AADTenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+        "ActivityDisplayName": "Get user",
+        "Id": "Directory_ghi789",
+        "LoggedByService": "Core Directory",
+        "Resource": "admin@contoso.com",
+        "ResourceGroup": "my-rg",
+        "Result": "success",
+        "ResultDescription": "User profile retrieved",
+        "ResultReason": "",
+        "SourceSystem": "Azure AD",
+        "TargetResources": {"type": "User", "displayName": "Admin User"}
+      }
+    }
+  ]
+}

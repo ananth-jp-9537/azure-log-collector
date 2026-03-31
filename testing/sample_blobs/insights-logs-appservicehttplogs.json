@@ -1,0 +1,48 @@
+{
+  "records": [
+    {
+      "time": "2026-03-18T10:32:00.000Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.Web/sites/my-web-app",
+      "operationName": "Microsoft.Web/sites/log",
+      "category": "AppServiceHTTPLogs",
+      "resultType": "",
+      "level": "Informational",
+      "properties": {
+        "CIp": "203.0.113.100",
+        "CsBytes": 512,
+        "CsHost": "my-web-app.azurewebsites.net",
+        "CsMethod": "GET",
+        "CsUriStem": "/api/health",
+        "Result": "Success",
+        "ScBytes": 1024,
+        "ScStatus": 200,
+        "ScSubStatus": "0",
+        "SPort": "443",
+        "TimeTaken": 45,
+        "UserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    },
+    {
+      "time": "2026-03-18T10:32:05.000Z",
+      "resourceId": "/subscriptions/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/resourceGroups/my-rg/providers/Microsoft.Web/sites/my-web-app",
+      "operationName": "Microsoft.Web/sites/log",
+      "category": "AppServiceHTTPLogs",
+      "resultType": "",
+      "level": "Warning",
+      "properties": {
+        "CIp": "198.51.100.42",
+        "CsBytes": 256,
+        "CsHost": "my-web-app.azurewebsites.net",
+        "CsMethod": "POST",
+        "CsUriStem": "/api/data",
+        "Result": "Failure",
+        "ScBytes": 128,
+        "ScStatus": 500,
+        "ScSubStatus": "0",
+        "SPort": "443",
+        "TimeTaken": 2300,
+        "UserAgent": "curl/7.88.1"
+      }
+    }
+  ]
+}
