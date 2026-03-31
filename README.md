@@ -120,7 +120,7 @@ No Event Hubs needed — storage-based polling eliminates the ~$11/region/month 
 │   ├── DiagSettingsManager/  ← Timer: 6h resource scan + config
 │   ├── Dashboard/            ← Web dashboard (single-page HTML)
 │   ├── tests/                ← 217 unit tests (pytest)
-│   └── ...                   ← 14 more HTTP API endpoints
+│   └── ...                   ← 17 more endpoints (21 functions total)
 ├── testing/
 │   ├── mock_s247_server.py   ← Mock S247 for local E2E testing
 │   ├── test_e2e.py           ← End-to-end test suite
