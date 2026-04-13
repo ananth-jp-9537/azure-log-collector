@@ -42,9 +42,15 @@ def get_local_version() -> str:
 
 
 def parse_version(version_str: str) -> Tuple[int, ...]:
-    """Parse a semver string into a comparable tuple."""
+    """Parse a semver string into a comparable tuple.
+
+    Strips pre-release suffixes (e.g. ``-alpha.1``, ``-beta``, ``-rc.2``)
+    before parsing so that ``0.1.0-alpha.1`` → ``(0, 1, 0)``.
+    """
     try:
-        return tuple(int(x) for x in version_str.split("."))
+        # Strip leading 'v' and pre-release/build metadata (everything after first -)
+        cleaned = version_str.lstrip("v").split("-", 1)[0]
+        return tuple(int(x) for x in cleaned.split("."))
     except (ValueError, AttributeError):
         return (0, 0, 0)
 

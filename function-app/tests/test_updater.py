@@ -40,6 +40,21 @@ class TestParseVersion:
     def test_empty(self):
         assert parse_version("") == (0, 0, 0)
 
+    def test_prerelease_alpha(self):
+        assert parse_version("0.1.0-alpha.1") == (0, 1, 0)
+
+    def test_prerelease_beta(self):
+        assert parse_version("2.0.0-beta") == (2, 0, 0)
+
+    def test_prerelease_rc(self):
+        assert parse_version("1.3.0-rc.2") == (1, 3, 0)
+
+    def test_leading_v(self):
+        assert parse_version("v1.2.3") == (1, 2, 3)
+
+    def test_leading_v_with_prerelease(self):
+        assert parse_version("v0.1.0-alpha.1") == (0, 1, 0)
+
 
 # ─── is_update_available ────────────────────────────────────────────────────
 
@@ -59,6 +74,12 @@ class TestIsUpdateAvailable:
 
     def test_major_bump(self):
         assert is_update_available("1.9.9", "2.0.0") is True
+
+    def test_prerelease_to_newer(self):
+        assert is_update_available("0.1.0-alpha.1", "0.2.0") is True
+
+    def test_same_prerelease(self):
+        assert is_update_available("0.1.0-alpha.1", "0.1.0-alpha.2") is False  # same numeric base
 
 
 # ─── _resolve_update_url ────────────────────────────────────────────────────
