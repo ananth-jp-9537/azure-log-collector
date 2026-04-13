@@ -44,15 +44,34 @@ def get_local_version() -> str:
 def parse_version(version_str: str) -> Tuple[int, ...]:
     """Parse a semver string into a comparable tuple.
 
-    Strips pre-release suffixes (e.g. ``-alpha.1``, ``-beta``, ``-rc.2``)
-    before parsing so that ``0.1.0-alpha.1`` → ``(0, 1, 0)``.
+    Handles pre-release suffixes so that ``0.1.0-alpha.2`` < ``0.1.0-alpha.3``
+    and ``0.1.0-alpha.1`` < ``0.1.0`` (release beats pre-release per semver).
+
+    Returns a tuple like ``(0, 1, 0, 0, 3)`` for ``0.1.0-alpha.3`` where the
+    4th element is 0 for pre-release (1 for release) and 5th is the pre-release
+    number.  A plain ``0.1.0`` returns ``(0, 1, 0, 1, 0)``.
     """
     try:
-        # Strip leading 'v' and pre-release/build metadata (everything after first -)
-        cleaned = version_str.lstrip("v").split("-", 1)[0]
-        return tuple(int(x) for x in cleaned.split("."))
+        stripped = version_str.strip().lstrip("v")
+        # Split core version from pre-release suffix
+        parts = stripped.split("-", 1)
+        core = tuple(int(x) for x in parts[0].split("."))
+        if len(parts) == 1:
+            # No pre-release — full release sorts higher
+            return core + (1, 0)
+        # Extract trailing number from pre-release (e.g. "alpha.3" → 3)
+        pre = parts[1]
+        pre_num = 0
+        pre_parts = pre.split(".")
+        for p in reversed(pre_parts):
+            try:
+                pre_num = int(p)
+                break
+            except ValueError:
+                continue
+        return core + (0, pre_num)
     except (ValueError, AttributeError):
-        return (0, 0, 0)
+        return (0, 0, 0, 0, 0)
 
 
 def _resolve_update_url(raw_url: str) -> str:
