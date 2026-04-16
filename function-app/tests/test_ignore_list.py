@@ -282,6 +282,19 @@ class TestLoadIgnoreList:
         result = load_ignore_list()
         assert result == {"resource_groups": [], "locations": [], "resource_ids": [], "subscriptions": [], "tags": {"include": [], "exclude": []}, "resource_types": []}
 
+    @patch("shared.ignore_list._get_blob_client")
+    def test_load_returns_independent_copies(self, mock_get_blob):
+        """Ensure multiple calls return independent objects (deep copy, not shared refs)."""
+        mock_get_blob.return_value = None
+        result1 = load_ignore_list()
+        result2 = load_ignore_list()
+        # Mutate the nested tags in result1
+        result1["tags"]["exclude"].append("env=test")
+        result1["resource_groups"].append("my-rg")
+        # result2 should be unaffected
+        assert result2["tags"]["exclude"] == []
+        assert result2["resource_groups"] == []
+
 
 # ─── save_ignore_list ────────────────────────────────────────────────────────
 

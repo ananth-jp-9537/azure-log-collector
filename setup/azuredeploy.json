@@ -212,8 +212,7 @@
                     { "name": "PROCESSING_ENABLED", "value": "true" },
                     { "name": "DIAG_STORAGE_SUFFIX", "value": "[parameters('diagStorageSuffix')]" },
                     { "name": "ENABLE_ORYX_BUILD", "value": "true" },
-                    { "name": "SCM_DO_BUILD_DURING_DEPLOYMENT", "value": "true" },
-                    { "name": "WEBSITE_RUN_FROM_PACKAGE", "value": "[parameters('functionZipUrl')]" }
+                    { "name": "SCM_DO_BUILD_DURING_DEPLOYMENT", "value": "true" }
                   ]
                 }
               },

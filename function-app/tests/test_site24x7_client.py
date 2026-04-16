@@ -429,6 +429,28 @@ class TestSite24x7Client:
         client.s247_base_url = "https://unknown.domain.com"
         assert client._get_upload_domain() == "logc.site24x7.com"  # fallback
 
+    def test_get_api_base_url_maps_www_to_plus(self, client):
+        """API base URL maps www.* to plus.* for servlet calls."""
+        client.s247_base_url = "https://www.site24x7.com"
+        assert client._get_api_base_url() == "https://plus.site24x7.com"
+
+        client.s247_base_url = "https://www.site24x7.in"
+        assert client._get_api_base_url() == "https://plus.site24x7.in"
+
+        client.s247_base_url = "https://www.site24x7.eu"
+        assert client._get_api_base_url() == "https://plus.site24x7.eu"
+
+        client.s247_base_url = "https://www.site24x7.net.au"
+        assert client._get_api_base_url() == "https://plus.site24x7.net.au"
+
+    def test_get_api_base_url_fallback_for_local(self, client):
+        """Local/unknown URLs pass through unchanged."""
+        client.s247_base_url = "https://localhost:8443"
+        assert client._get_api_base_url() == "https://localhost:8443"
+
+        client.s247_base_url = "https://internal.test.server:8443"
+        assert client._get_api_base_url() == "https://internal.test.server:8443"
+
     def test_create_log_types_empty_list(self, client):
         result = client.create_log_types([])
         assert result == []
@@ -440,6 +462,35 @@ class TestSite24x7Client:
             client.circuit_breaker.record_failure()
         assert client.post_logs("dummy", []) is False
         mock_urlopen.assert_not_called()
+
+    @patch("shared.site24x7_client.urllib.request.urlopen")
+    def test_post_logs_overrides_stale_config(self, mock_urlopen, client):
+        """post_logs() overrides uploadDomain and apiKey from stale blob configs."""
+        client.device_key = "live_key_123"
+        client.s247_base_url = "https://www.site24x7.in"
+        stale_config = {
+            "apiKey": "old_stale_key",
+            "logType": "TestLog",
+            "uploadDomain": "old.relay.domain.com",
+            "dateFormat": "%Y-%m-%dT%H:%M:%S.%f",
+            "dateField": "time",
+            "jsonPath": [{"name": "msg", "key": "message"}],
+        }
+        config_b64 = b64encode(json.dumps(stale_config).encode()).decode()
+        events = [{"time": "2024-01-01T00:00:00.000000", "message": "hello"}]
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.getheaders.return_value = [("x-uploadid", "uid123")]
+        mock_urlopen.return_value = mock_resp
+
+        result = client.post_logs(config_b64, events)
+        assert result is True
+        # Verify the upload went to the correct domain (logc.site24x7.in, not old.relay.domain.com)
+        call_args = mock_urlopen.call_args
+        req = call_args[0][0]
+        assert "logc.site24x7.in" in req.full_url
+        assert "live_key_123" in req.full_url or req.get_header("X-devicekey") == "live_key_123"
 
     @patch("shared.site24x7_client.urllib.request.urlopen")
     def test_post_logs_success(self, mock_urlopen, client):

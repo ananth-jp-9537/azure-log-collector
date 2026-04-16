@@ -18,6 +18,7 @@ Each tag rule can be ``"key=value"`` (exact match) or ``"key"`` (matches
 any value for that key).
 """
 
+import copy
 import json
 import logging
 import os
@@ -80,7 +81,7 @@ def load_ignore_list() -> Dict:
     """
     blob_client = _get_blob_client()
     if blob_client is None:
-        return dict(_EMPTY_IGNORE_LIST)
+        return copy.deepcopy(_EMPTY_IGNORE_LIST)
 
     try:
         data = blob_client.download_blob().readall()
@@ -95,7 +96,7 @@ def load_ignore_list() -> Dict:
             )
         else:
             logger.error(f"Failed to load ignore list: {e}")
-        return dict(_EMPTY_IGNORE_LIST)
+        return copy.deepcopy(_EMPTY_IGNORE_LIST)
 
 
 def save_ignore_list(ignore_list: Dict) -> bool:

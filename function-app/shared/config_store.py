@@ -126,7 +126,7 @@ def is_supported_log_type(category: str) -> bool:
     supported = get_supported_log_types()
     if not supported:
         return False
-    normalized = category.replace("-", "").replace("_", "").lower()
+    normalized = category.replace("-", "").replace("_", "").replace(" ", "").lower()
     return normalized in supported
 
 

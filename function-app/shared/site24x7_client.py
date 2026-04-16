@@ -206,7 +206,7 @@ class Site24x7Client:
             return self._proxy_api_request(path, url_params, method)
         # ─────────────────────────────────────────────────────────────────
 
-        url = f"{self.s247_base_url}{path}?{urllib.parse.urlencode(url_params)}"
+        url = f"{self._get_api_base_url()}{path}?{urllib.parse.urlencode(url_params)}"
 
         try:
             req = urllib.request.Request(url, method=method)
@@ -266,6 +266,17 @@ class Site24x7Client:
 
     # ─── Azure Log Type Management ───────────────────────────────────────
 
+    # SITE24X7_BASE_URL uses www.* (user-facing), but servlet API calls
+    # must go to plus.* (internal AppLog server).
+    _API_DOMAIN_MAP = {
+        "www.site24x7.com": "plus.site24x7.com",
+        "www.site24x7.in": "plus.site24x7.in",
+        "www.site24x7.eu": "plus.site24x7.eu",
+        "www.site24x7.net.au": "plus.site24x7.net.au",
+        "www.site24x7.cn": "plus.site24x7.cn",
+        "www.site24x7.jp": "plus.site24x7.jp",
+    }
+
     # Upload domain mapping per Site24x7 data center.
     # SITE24X7_BASE_URL → upload subdomain used by _send_logs_to_s247().
     _UPLOAD_DOMAIN_MAP = {
@@ -290,6 +301,17 @@ class Site24x7Client:
             if base_domain in self.s247_base_url:
                 return upload_domain
         return "logc.site24x7.com"
+
+    def _get_api_base_url(self) -> str:
+        """Derive the AppLog API base URL from SITE24X7_BASE_URL.
+
+        Maps www.site24x7.* → plus.site24x7.* for servlet API calls.
+        Falls back to SITE24X7_BASE_URL if no mapping found (e.g., local testing).
+        """
+        for www_domain, plus_domain in self._API_DOMAIN_MAP.items():
+            if www_domain in self.s247_base_url:
+                return self.s247_base_url.replace(www_domain, plus_domain)
+        return self.s247_base_url
 
     def get_supported_log_types(self) -> Optional[Dict]:
         """Fetch supported Azure log types from Site24x7.
@@ -544,6 +566,11 @@ class Site24x7Client:
 
         try:
             config = json.loads(b64decode(source_config_b64).decode("utf-8"))
+
+            # Always use the live upload domain and API key (blob configs may
+            # have stale values from an earlier scan or different environment)
+            config["uploadDomain"] = self._get_upload_domain()
+            config["apiKey"] = self.device_key
 
             # Prepare masking/hashing/derived configs
             masking_config = config.get("maskingConfig")
