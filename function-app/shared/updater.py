@@ -17,11 +17,15 @@ Supports two URL formats for UPDATE_CHECK_URL:
    Automatically expanded to the GitHub Releases latest API URL.
 """
 
+import ast
 import json
 import logging
 import os
 import re
 import tempfile
+import time
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -82,8 +86,13 @@ def _resolve_update_url(raw_url: str) -> str:
     raw_url = raw_url.strip()
     if raw_url.startswith(("http://", "https://")):
         return raw_url
-    # Treat as GitHub owner/repo shorthand
+    # Treat as GitHub owner/repo shorthand. Channel controls which endpoint:
+    #   stable     → /releases/latest (GitHub auto-excludes pre-releases)
+    #   prerelease → /releases        (returns all, we take the first)
     if re.match(r"^[\w.-]+/[\w.-]+$", raw_url):
+        channel = os.environ.get("UPDATE_CHANNEL", "stable").strip().lower()
+        if channel == "prerelease":
+            return f"https://api.github.com/repos/{raw_url}/releases?per_page=5"
         return f"https://api.github.com/repos/{raw_url}/releases/latest"
     return raw_url
 
@@ -96,6 +105,8 @@ def _parse_github_release(data: Dict) -> Optional[Dict]:
         return None
 
     assets: List[Dict] = data.get("assets", [])
+    published_at = data.get("published_at") or data.get("created_at") or ""
+    is_prerelease = bool(data.get("prerelease", False))
 
     # Look for version.json asset first (has explicit package_url)
     for asset in assets:
@@ -104,7 +115,10 @@ def _parse_github_release(data: Dict) -> Optional[Dict]:
                 dl_url = asset.get("browser_download_url", "")
                 resp = requests.get(dl_url, timeout=30)
                 resp.raise_for_status()
-                return resp.json()
+                info = resp.json()
+                info.setdefault("published_at", published_at)
+                info.setdefault("prerelease", is_prerelease)
+                return info
             except Exception:
                 logger.debug("Could not download version.json asset — falling back to zip detection")
 
@@ -131,6 +145,8 @@ def _parse_github_release(data: Dict) -> Optional[Dict]:
         "version": version,
         "package_url": zip_url,
         "release_notes": data.get("body", ""),
+        "published_at": published_at,
+        "prerelease": is_prerelease,
     }
 
 
@@ -155,6 +171,14 @@ def fetch_remote_version(update_url: str) -> Optional[Dict]:
         resp.raise_for_status()
         data = resp.json()
 
+        # /releases returns a list. We take the most recent — GitHub sorts DESC.
+        # On the prerelease channel this naturally picks up alphas/betas.
+        if isinstance(data, list):
+            if not data:
+                logger.error("Releases list from %s is empty", resolved_url)
+                return None
+            data = data[0]
+
         # Detect GitHub Releases API response (has tag_name field)
         if "tag_name" in data:
             return _parse_github_release(data)
@@ -173,6 +197,145 @@ def fetch_remote_version(update_url: str) -> Optional[Dict]:
 def is_update_available(local_version: str, remote_version: str) -> bool:
     """Compare versions — returns True if remote is newer."""
     return parse_version(remote_version) > parse_version(local_version)
+
+
+# ─── Safety helpers (prevent AutoUpdater from deploying a broken build) ──────
+
+# Critical files that must be present and parseable. AutoUpdater refuses to
+# deploy a zip missing any of these — that would brick the Function App.
+_REQUIRED_FILES = (
+    "function-app/host.json",
+    "function-app/requirements.txt",
+    "function-app/VERSION",
+    "function-app/AutoUpdater/__init__.py",
+    "function-app/AutoUpdater/function.json",
+    "function-app/shared/updater.py",
+)
+
+
+def _release_too_young(published_at: str, min_age_minutes: int) -> bool:
+    """True if the release is younger than ``min_age_minutes``.
+
+    Lets ops notice and delete a bad release before it auto-propagates.
+    """
+    if not published_at or min_age_minutes <= 0:
+        return False
+    try:
+        pub = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    age = (datetime.now(timezone.utc) - pub).total_seconds() / 60.0
+    return age < min_age_minutes
+
+
+def validate_zip_package(zip_path: str) -> Tuple[bool, str]:
+    """Validate a downloaded update zip before deploying it.
+
+    Refuses anything with:
+      - syntax errors in any .py file
+      - invalid JSON in host.json / function.json
+      - missing critical files (host.json, VERSION, AutoUpdater, shared/updater.py)
+
+    Returns ``(ok, reason)``. ``reason`` is empty on success.
+    """
+    try:
+        if not zipfile.is_zipfile(zip_path):
+            return False, "downloaded file is not a valid zip archive"
+
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+
+            # Some release zips are rooted at function-app/, others at the
+            # repo root. Detect the prefix.
+            prefix = ""
+            if not any(n.startswith("function-app/") for n in names):
+                # Maybe rooted at function-app contents directly
+                if "host.json" in names:
+                    prefix = ""
+                    required = tuple(
+                        r.replace("function-app/", "") for r in _REQUIRED_FILES
+                    )
+                else:
+                    return False, "zip layout unrecognised (no host.json found)"
+            else:
+                required = _REQUIRED_FILES
+
+            missing = [r for r in required if r not in names]
+            if missing:
+                return False, f"missing required files: {missing[:3]}"
+
+            # Syntax-check every .py, JSON-validate every .json
+            py_count = 0
+            json_count = 0
+            for name in names:
+                if name.endswith("/") or "__pycache__" in name:
+                    continue
+                if name.endswith(".py"):
+                    py_count += 1
+                    try:
+                        src = zf.read(name).decode("utf-8", errors="replace")
+                        ast.parse(src, filename=name)
+                    except SyntaxError as e:
+                        return False, f"syntax error in {name}: {e}"
+                    except Exception as e:
+                        return False, f"cannot parse {name}: {e}"
+                elif name.endswith((".json",)):
+                    # host.json, function.json, settings files
+                    json_count += 1
+                    try:
+                        json.loads(zf.read(name).decode("utf-8", errors="replace"))
+                    except Exception as e:
+                        return False, f"invalid JSON in {name}: {e}"
+
+            # VERSION file must exist and not be empty
+            version_path = f"{prefix}VERSION" if prefix == "" else "function-app/VERSION"
+            # Try both possible paths
+            for p in ("function-app/VERSION", "VERSION"):
+                if p in names:
+                    version_path = p
+                    break
+            try:
+                v = zf.read(version_path).decode("utf-8").strip()
+                if not v or len(v) > 64:
+                    return False, "VERSION file empty or absurdly long"
+            except Exception as e:
+                return False, f"cannot read VERSION: {e}"
+
+            logger.info(
+                "Update zip validated: %d py files, %d json files, VERSION=%s",
+                py_count, json_count, v,
+            )
+            return True, ""
+    except Exception as e:
+        return False, f"validation crashed: {e}"
+
+
+def _post_deploy_health_check(func_app_name: str, checks: int = 3,
+                               interval_sec: int = 30) -> Dict:
+    """Ping our own /api/health a few times post-deploy and return the result.
+
+    Informational only — does NOT trigger a rollback. Gives ops visibility
+    (via debug_logger audit trail) into whether the newly-deployed build
+    actually starts.
+    """
+    hostname = f"{func_app_name}.azurewebsites.net"
+    url = f"https://{hostname}/api/health"
+    # Warm-up: newly-deployed Functions need time to cold-start + load deps
+    time.sleep(20)
+
+    results = []
+    for i in range(checks):
+        try:
+            resp = requests.get(url, timeout=15)
+            results.append({"status": resp.status_code, "ok": resp.ok})
+            if resp.ok:
+                return {"healthy": True, "checks": results, "url": url}
+        except Exception as e:
+            results.append({"error": str(e)[:200]})
+        if i < checks - 1:
+            time.sleep(interval_sec)
+
+    return {"healthy": False, "checks": results, "url": url}
 
 
 def deploy_update(package_url: str) -> Dict:
@@ -201,6 +364,18 @@ def deploy_update(package_url: str) -> Dict:
                 tmp.write(chunk)
             tmp_path = tmp.name
         logger.info(f"Downloaded to {tmp_path}")
+
+        # Safety gate: never deploy a zip that won't import / parse.
+        # This is what prevents AutoUpdater from bricking itself.
+        ok, reason = validate_zip_package(tmp_path)
+        if not ok:
+            os.unlink(tmp_path)
+            logger.error("Refusing to deploy — package validation failed: %s", reason)
+            return {
+                "success": False,
+                "error": f"package validation failed: {reason}",
+                "validation_failed": True,
+            }
 
         # Deploy via ARM API
         credential = DefaultAzureCredential()
@@ -255,15 +430,25 @@ def check_and_apply_update(auto_apply: bool = False) -> Dict:
     Returns:
         Status dict with update info and action taken.
     """
+    local_ver = get_local_version()
+
+    # ── Emergency kill switch: ops can disable AutoUpdater without a redeploy.
+    if os.environ.get("SKIP_AUTO_UPDATE", "").lower() in ("1", "true", "yes"):
+        return {
+            "update_available": False,
+            "message": "SKIP_AUTO_UPDATE is set — updates disabled by operator",
+            "local_version": local_ver,
+            "action": "disabled",
+        }
+
     update_url = os.environ.get("UPDATE_CHECK_URL", "")
     if not update_url:
         return {
             "update_available": False,
             "message": "UPDATE_CHECK_URL not configured — auto-updates disabled",
-            "local_version": get_local_version(),
+            "local_version": local_ver,
         }
 
-    local_ver = get_local_version()
     remote_info = fetch_remote_version(update_url)
 
     if not remote_info:
@@ -282,6 +467,64 @@ def check_and_apply_update(auto_apply: bool = False) -> Dict:
         "remote_version": remote_ver,
         "release_notes": remote_info.get("release_notes", ""),
     }
+
+    # ── Channel guard: customers on the 'stable' channel never install
+    # alpha/beta/rc builds, even if misconfiguration points them at a
+    # prerelease URL. Your test environment sets UPDATE_CHANNEL=prerelease.
+    channel = os.environ.get("UPDATE_CHANNEL", "stable").strip().lower()
+    # A version is pre-release if parse_version's second-to-last slot is 0
+    # (see parse_version docstring) OR the GitHub release is flagged.
+    parsed = parse_version(remote_ver)
+    is_prerelease = bool(remote_info.get("prerelease")) or (
+        len(parsed) >= 2 and parsed[-2] == 0 and parsed[:-2] != (0, 0, 0)
+    )
+    if is_prerelease and channel != "prerelease":
+        result["action"] = "prerelease_skipped"
+        result["update_available"] = False
+        result["channel"] = channel
+        result["message"] = (
+            f"Remote {remote_ver} is a pre-release; channel={channel} — skipping"
+        )
+        return result
+    result["channel"] = channel
+
+    # ── Pinned version: stick to exactly this version, nothing else.
+    # Use for freezing prod or rolling back to a specific known-good release.
+    pinned = os.environ.get("PINNED_VERSION", "").strip().lstrip("v")
+    if pinned:
+        result["pinned_version"] = pinned
+        if parse_version(pinned) == parse_version(local_ver):
+            result["action"] = "pinned_current"
+            result["update_available"] = False
+            result["message"] = f"PINNED_VERSION={pinned} already installed"
+            return result
+        # Pinned differs from local — only deploy if remote matches the pin.
+        if parse_version(remote_ver) != parse_version(pinned):
+            result["action"] = "pinned_mismatch"
+            result["update_available"] = False
+            result["message"] = (
+                f"PINNED_VERSION={pinned} but remote latest is {remote_ver} — skipping"
+            )
+            return result
+        # Remote == pinned && != local → proceed (treat as update).
+        has_update = True
+        result["update_available"] = True
+
+    # ── Minimum release age: skip releases younger than N minutes.
+    # Gives ops time to delete a bad release before it auto-propagates.
+    if has_update and auto_apply:
+        try:
+            min_age = int(os.environ.get("MIN_RELEASE_AGE_MINUTES", "60"))
+        except ValueError:
+            min_age = 60
+        published_at = remote_info.get("published_at", "")
+        if _release_too_young(published_at, min_age):
+            result["action"] = "release_too_young"
+            result["message"] = (
+                f"Release {remote_ver} is younger than {min_age}m — deferring"
+            )
+            result["published_at"] = published_at
+            return result
 
     if has_update and auto_apply:
         logger.info(f"Applying update: {local_ver} → {remote_ver}")

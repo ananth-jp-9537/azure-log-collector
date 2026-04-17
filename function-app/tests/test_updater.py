@@ -331,3 +331,258 @@ class TestCheckAndApplyUpdate:
         assert result["update_available"] is True
         # Verify fetch was called with the shorthand (it internally resolves)
         mock_remote.assert_called_once_with("owner/repo")
+
+
+# ─── Safety hardening: PINNED_VERSION / SKIP / age gate / zip validation ────
+
+
+class TestSkipAutoUpdate:
+    def test_skip_via_env(self, monkeypatch):
+        monkeypatch.setenv("SKIP_AUTO_UPDATE", "true")
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/version.json")
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "disabled"
+        assert result["update_available"] is False
+
+
+class TestPinnedVersion:
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_pinned_matches_local(self, mock_local, mock_remote, monkeypatch):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("PINNED_VERSION", "1.0.0")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {"version": "2.0.0", "package_url": "x"}
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "pinned_current"
+        assert result["update_available"] is False
+
+    @patch("shared.updater.deploy_update")
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_pinned_mismatch_with_remote(
+        self, mock_local, mock_remote, mock_deploy, monkeypatch
+    ):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("PINNED_VERSION", "1.5.0")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {"version": "2.0.0", "package_url": "x"}
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "pinned_mismatch"
+        mock_deploy.assert_not_called()
+
+    @patch("shared.updater.deploy_update")
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_pinned_matches_remote_deploys(
+        self, mock_local, mock_remote, mock_deploy, monkeypatch
+    ):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("PINNED_VERSION", "1.5.0")
+        monkeypatch.setenv("MIN_RELEASE_AGE_MINUTES", "0")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {"version": "1.5.0", "package_url": "pkg"}
+        mock_deploy.return_value = {"success": True}
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "deployed"
+        mock_deploy.assert_called_once_with("pkg")
+
+
+class TestReleaseAgeGate:
+    @patch("shared.updater.deploy_update")
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_young_release_deferred(
+        self, mock_local, mock_remote, mock_deploy, monkeypatch
+    ):
+        from datetime import datetime, timezone
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("MIN_RELEASE_AGE_MINUTES", "60")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {
+            "version": "2.0.0",
+            "package_url": "x",
+            "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "release_too_young"
+        mock_deploy.assert_not_called()
+
+    @patch("shared.updater.deploy_update")
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_old_release_deploys(
+        self, mock_local, mock_remote, mock_deploy, monkeypatch
+    ):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("MIN_RELEASE_AGE_MINUTES", "60")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {
+            "version": "2.0.0",
+            "package_url": "pkg",
+            "published_at": "2020-01-01T00:00:00Z",
+        }
+        mock_deploy.return_value = {"success": True}
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "deployed"
+
+
+class TestValidateZipPackage:
+    def _make_zip(self, tmp_path, files):
+        import zipfile as zf
+        p = tmp_path / "pkg.zip"
+        with zf.ZipFile(p, "w") as z:
+            for name, content in files.items():
+                z.writestr(name, content)
+        return str(p)
+
+    def test_valid_package(self, tmp_path):
+        from shared.updater import validate_zip_package
+        files = {
+            "function-app/host.json": '{"version":"2.0"}',
+            "function-app/requirements.txt": "azure-functions\n",
+            "function-app/VERSION": "1.2.3",
+            "function-app/AutoUpdater/__init__.py": "def main():\n    pass\n",
+            "function-app/AutoUpdater/function.json": '{"bindings":[]}',
+            "function-app/shared/updater.py": "x = 1\n",
+        }
+        ok, reason = validate_zip_package(self._make_zip(tmp_path, files))
+        assert ok, reason
+
+    def test_syntax_error_rejected(self, tmp_path):
+        from shared.updater import validate_zip_package
+        files = {
+            "function-app/host.json": "{}",
+            "function-app/requirements.txt": "",
+            "function-app/VERSION": "1.0.0",
+            "function-app/AutoUpdater/__init__.py": "def main(:\n",  # syntax error
+            "function-app/AutoUpdater/function.json": "{}",
+            "function-app/shared/updater.py": "x = 1\n",
+        }
+        ok, reason = validate_zip_package(self._make_zip(tmp_path, files))
+        assert not ok
+        assert "syntax" in reason.lower()
+
+    def test_missing_required_file(self, tmp_path):
+        from shared.updater import validate_zip_package
+        files = {
+            "function-app/host.json": "{}",
+            "function-app/requirements.txt": "",
+            # VERSION missing
+            "function-app/AutoUpdater/__init__.py": "pass\n",
+            "function-app/AutoUpdater/function.json": "{}",
+            "function-app/shared/updater.py": "pass\n",
+        }
+        ok, reason = validate_zip_package(self._make_zip(tmp_path, files))
+        assert not ok
+        assert "missing" in reason.lower()
+
+    def test_bad_json_rejected(self, tmp_path):
+        from shared.updater import validate_zip_package
+        files = {
+            "function-app/host.json": "{not valid json",
+            "function-app/requirements.txt": "",
+            "function-app/VERSION": "1.0.0",
+            "function-app/AutoUpdater/__init__.py": "pass\n",
+            "function-app/AutoUpdater/function.json": "{}",
+            "function-app/shared/updater.py": "pass\n",
+        }
+        ok, reason = validate_zip_package(self._make_zip(tmp_path, files))
+        assert not ok
+        assert "json" in reason.lower()
+
+    def test_not_a_zip(self, tmp_path):
+        from shared.updater import validate_zip_package
+        p = tmp_path / "not.zip"
+        p.write_bytes(b"hello")
+        ok, reason = validate_zip_package(str(p))
+        assert not ok
+
+
+# ─── UPDATE_CHANNEL: stable vs prerelease ────────────────────────────────────
+
+
+class TestUpdateChannel:
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_stable_skips_prerelease_tag(self, mock_local, mock_remote, monkeypatch):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.delenv("UPDATE_CHANNEL", raising=False)
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {
+            "version": "1.1.0-alpha.1",
+            "package_url": "x",
+            "prerelease": False,  # even if flag missing, version string alone triggers it
+        }
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "prerelease_skipped"
+        assert result["update_available"] is False
+
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_stable_skips_github_prerelease_flag(self, mock_local, mock_remote, monkeypatch):
+        # Version string looks stable but GitHub release is flagged prerelease
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {
+            "version": "1.1.0",
+            "package_url": "x",
+            "prerelease": True,
+        }
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "prerelease_skipped"
+
+    @patch("shared.updater.deploy_update")
+    @patch("shared.updater.fetch_remote_version")
+    @patch("shared.updater.get_local_version")
+    def test_prerelease_channel_accepts_alpha(
+        self, mock_local, mock_remote, mock_deploy, monkeypatch
+    ):
+        monkeypatch.setenv("UPDATE_CHECK_URL", "https://example.com/v.json")
+        monkeypatch.setenv("UPDATE_CHANNEL", "prerelease")
+        monkeypatch.setenv("MIN_RELEASE_AGE_MINUTES", "0")
+        mock_local.return_value = "1.0.0"
+        mock_remote.return_value = {
+            "version": "1.1.0-alpha.3",
+            "package_url": "pkg",
+            "prerelease": True,
+        }
+        mock_deploy.return_value = {"success": True}
+        result = check_and_apply_update(auto_apply=True)
+        assert result["action"] == "deployed"
+
+    def test_resolve_prerelease_channel(self, monkeypatch):
+        from shared.updater import _resolve_update_url
+        monkeypatch.setenv("UPDATE_CHANNEL", "prerelease")
+        url = _resolve_update_url("owner/repo")
+        assert url.endswith("/releases?per_page=5")
+
+    def test_resolve_stable_channel_default(self, monkeypatch):
+        from shared.updater import _resolve_update_url
+        monkeypatch.delenv("UPDATE_CHANNEL", raising=False)
+        url = _resolve_update_url("owner/repo")
+        assert url.endswith("/releases/latest")
+
+    @patch("shared.updater.requests.get")
+    def test_fetch_unwraps_list_response(self, mock_get):
+        # /releases returns a list; we take the first (most recent)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [
+            {
+                "tag_name": "v2.0.0-beta.1",
+                "prerelease": True,
+                "body": "",
+                "assets": [
+                    {
+                        "name": "s247-function-app.zip",
+                        "browser_download_url": "https://github.com/o/r/releases/download/v2.0.0-beta.1/s247-function-app.zip",
+                    },
+                ],
+            },
+            {"tag_name": "v1.5.0", "prerelease": False, "assets": []},
+        ]
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+        result = fetch_remote_version("https://api.github.com/repos/o/r/releases?per_page=5")
+        assert result["version"] == "2.0.0-beta.1"
+        assert result["prerelease"] is True
