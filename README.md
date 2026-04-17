@@ -134,19 +134,45 @@ No Event Hubs needed — storage-based polling eliminates the ~$11/region/month 
 
 ## Auto-Updates
 
-The Function App can self-update from GitHub Releases:
+The Function App can self-update from GitHub Releases.
+
+### Basic setup
 
 1. Set `UPDATE_CHECK_URL` app setting to `ananth-jp-9537/azure-log-collector`
 2. Bump `function-app/VERSION` and push to `main`
 3. GitHub Actions creates a release with the deployable zip
-4. The Function App detects the new version and offers update via dashboard
+4. The Function App detects the new version and deploys it on its next nightly run (3 AM UTC)
+
+### Safety controls (app settings)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `UPDATE_CHANNEL` | `stable` | `stable` refuses any alpha/beta/rc; `prerelease` accepts them. Use `prerelease` in test environments. |
+| `PINNED_VERSION` | *(unset)* | If set (e.g. `1.2.3`), AutoUpdater only deploys this exact version. Use for freezing prod or rolling back. |
+| `SKIP_AUTO_UPDATE` | `false` | `true` disables AutoUpdater entirely — emergency switch, no redeploy needed. |
+| `MIN_RELEASE_AGE_MINUTES` | `60` | Refuses releases younger than N minutes. Gives you a grace window to delete a bad release before it propagates. |
+
+### Separating alpha/beta from customer builds
+
+Check GitHub's "Set as a pre-release" box when creating alpha/beta tags. With defaults:
+
+- Customers (`UPDATE_CHANNEL=stable`) skip pre-releases automatically — they only see stable `/releases/latest`.
+- Your test environment (`UPDATE_CHANNEL=prerelease`) picks up the newest release of any kind.
+
+### Rollback
+
+1. Delete or un-publish the bad release on GitHub (or mark it a pre-release).
+2. Tag a new release with the previous known-good content, OR set `PINNED_VERSION=<known-good>` on prod.
+3. Next AutoUpdater run reconciles to the pinned/latest-stable version.
+
+Every AutoUpdater run writes audit events (`auto_update_run`, `auto_update_health_check`) visible via the debug-logs endpoint.
 
 ## Development
 
 ```bash
 cd function-app
 pip install -r requirements-dev.txt
-python3 -m pytest tests/ -v     # 217 tests, ~3s
+python3 -m pytest tests/ -v     # 260 tests, ~4s
 ```
 
 See [docs/developer-guide.md](docs/developer-guide.md) for detailed development setup.

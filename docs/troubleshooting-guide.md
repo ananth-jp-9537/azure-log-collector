@@ -278,6 +278,54 @@ az functionapp config appsettings list -g s247-diag-logs-rg -n <func-app-name> \
 
 ---
 
+## AutoUpdater Issues
+
+### "AutoUpdater deployed a bad build"
+
+**Symptoms:** After a scheduled update the Function App returns 503, or one of the functions stops working.
+
+**Rollback (no redeploy required):**
+
+```bash
+# Pin to the previous known-good version
+az functionapp config appsettings set -g s247-diag-logs-rg -n <func-app-name> \
+  --settings PINNED_VERSION=<known-good-version>
+
+# Or halt AutoUpdater entirely while you investigate
+az functionapp config appsettings set -g s247-diag-logs-rg -n <func-app-name> \
+  --settings SKIP_AUTO_UPDATE=true
+```
+
+Then tag a new release from the last-good commit; AutoUpdater will reconcile on its next run.
+
+**Prevention:** `validate_zip_package()` now refuses packages with Python syntax errors, malformed JSON, or missing required files. `MIN_RELEASE_AGE_MINUTES=60` gives you a grace window to delete a bad release.
+
+### "AutoUpdater didn't update us"
+
+Check these in order:
+
+1. **Is AutoUpdater disabled?**
+   ```bash
+   az functionapp config appsettings list -g s247-diag-logs-rg -n <func-app-name> \
+     --query "[?name=='SKIP_AUTO_UPDATE' || name=='PINNED_VERSION' || name=='UPDATE_CHANNEL' || name=='UPDATE_CHECK_URL' || name=='MIN_RELEASE_AGE_MINUTES'].{name:name,value:value}" -o table
+   ```
+
+2. **Is the remote release a pre-release?** On the `stable` channel (default), pre-releases are refused. Set `UPDATE_CHANNEL=prerelease` only on test environments.
+
+3. **Is the release too young?** `MIN_RELEASE_AGE_MINUTES` defaults to 60. Lower or set to `0` to pick up immediately.
+
+4. **Audit events:** Query App Insights / debug logs:
+   ```
+   event == "auto_update_run" | order by timestamp desc | take 10
+   ```
+   The `action` field reveals the exact reason: `disabled`, `pinned_current`, `pinned_mismatch`, `prerelease_skipped`, `release_too_young`, `up_to_date`, `deployed`, `deploy_failed`.
+
+### "Health check failed after deploy"
+
+Look for `event == "auto_update_health_check"` with `healthy: false`. The new build is likely crashing at startup. Check App Insights `exceptions` and `traces` for import errors; roll back with `PINNED_VERSION` per above.
+
+---
+
 ## Escalation Checklist
 
 Before escalating, collect:

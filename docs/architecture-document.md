@@ -477,16 +477,39 @@ Azure Diagnostic Settings require the destination Storage Account to be **in the
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  1. Read UPDATE_CHECK_URL env var (skip if not set)                    │
-│  2. GET remote version.json from URL                                   │
-│  3. Compare semver: local VERSION file vs remote version               │
-│  4. If remote > local:                                                  │
-│     ├─ Download package from package_url (timeout: 300s)               │
-│     ├─ POST to ARM zipdeploy API                                       │
-│     └─ Function App restarts with new version                          │
-│  5. If local >= remote: log "up_to_date"                               │
+│  1. SKIP_AUTO_UPDATE=true? → exit (action=disabled)                    │
+│  2. Read UPDATE_CHECK_URL (skip if unset)                              │
+│  3. PINNED_VERSION set? → only proceed if remote == pin                │
+│  4. Fetch remote release (owner/repo → /releases/latest on stable      │
+│     channel, /releases on prerelease channel)                          │
+│  5. UPDATE_CHANNEL=stable? → skip if version is pre-release            │
+│     (by -alpha/-beta suffix OR GitHub prerelease flag)                 │
+│  6. Compare semver: local VERSION vs remote                            │
+│  7. Release younger than MIN_RELEASE_AGE_MINUTES? → defer              │
+│  8. Download zip, run validate_zip_package():                          │
+│     ├─ zipfile integrity                                               │
+│     ├─ ast.parse every .py file                                        │
+│     ├─ json.loads every .json file                                     │
+│     └─ required files present                                          │
+│  9. Validation failed? → refuse to deploy (action=deploy_failed)       │
+│ 10. POST to ARM zipdeploy API (Managed Identity)                       │
+│ 11. Function App restarts with new version                             │
+│ 12. Post-deploy: ping /api/health, write auto_update_health_check      │
+│     audit event (informational, no rollback)                           │
+│ 13. Every run writes auto_update_run audit event                       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Failure modes and mitigations:**
+
+| Failure | Outcome |
+|---|---|
+| Downloaded zip has a syntax error | Refused at step 9 (action=deploy_failed); current version stays |
+| Release tagged as pre-release on GitHub | Skipped on stable channel (step 5) |
+| Bad release published | 60-min grace window (step 7) allows deletion before propagation |
+| Rollback needed | Set `PINNED_VERSION=<known-good>` — no redeploy required |
+| Emergency halt | Set `SKIP_AUTO_UPDATE=true` — no redeploy required |
+| Post-deploy health fails | Logged via audit event; operator must redeploy or pin |
 
 ---
 
@@ -1081,7 +1104,11 @@ When OPEN: post_logs() returns False immediately (logs are dropped to prevent ba
 | `PROCESSING_ENABLED` | `true` | Toggle BlobLogProcessor |
 | `GENERAL_LOGTYPE_ENABLED` | `false` | Enable general catch-all log type |
 | `S247_GENERAL_LOGTYPE` | (none) | Base64-encoded general sourceConfig |
-| `UPDATE_CHECK_URL` | (none) | URL to version.json for auto-updates |
+| `UPDATE_CHECK_URL` | (none) | URL or `owner/repo` shorthand for auto-updates |
+| `UPDATE_CHANNEL` | `stable` | `stable` or `prerelease` — release channel filter |
+| `PINNED_VERSION` | (none) | If set, AutoUpdater only deploys this version |
+| `SKIP_AUTO_UPDATE` | `false` | `true` disables AutoUpdater entirely |
+| `MIN_RELEASE_AGE_MINUTES` | `60` | Minimum age before a release is eligible |
 | `LAST_SCAN_TIME` | `never` | Last scan timestamp (auto-updated) |
 | `FUNCTION_APP_NAME` | `s247-diag-logs-func` | Function App name |
 

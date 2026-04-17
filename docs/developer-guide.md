@@ -1412,18 +1412,55 @@ The Azure Functions build system installs dependencies from `requirements.txt` d
 
 ### How Auto-Update Works
 
-The `AutoUpdater` function (timer-triggered) and `CheckUpdate` endpoint (HTTP) use `shared/updater.py`:
+The `AutoUpdater` function (timer-triggered, 3 AM UTC daily) and `CheckUpdate` endpoint (HTTP) both use `shared/updater.py`. The flow has several hard safety gates so AutoUpdater cannot brick the Function App with a bad release.
 
-1. **Check:** `fetch_remote_version(UPDATE_CHECK_URL)` fetches the latest version from one of:
+**Pipeline:**
+
+1. **Kill-switch / pin check** — If `SKIP_AUTO_UPDATE=true`, exit immediately. If `PINNED_VERSION` is set, only proceed when remote matches the pin.
+2. **Fetch:** `fetch_remote_version(UPDATE_CHECK_URL)` supports:
    - A direct `version.json` URL
    - GitHub Releases API (`https://api.github.com/repos/owner/repo/releases/latest`)
-   - GitHub shorthand (`owner/repo`)
+   - GitHub shorthand (`owner/repo`) — resolved to `/releases/latest` on the stable channel or `/releases` on the prerelease channel
+3. **Channel filter:** If `UPDATE_CHANNEL=stable` (default), refuse any version with a pre-release suffix (`-alpha`, `-beta`, `-rc.N`) OR any GitHub release flagged `prerelease: true`.
+4. **Compare:** `is_update_available()` runs semver comparison against the local `VERSION` file.
+5. **Age gate:** Skip releases younger than `MIN_RELEASE_AGE_MINUTES` (default 60). Protects against shipping a bad release before the author notices.
+6. **Download + validate:** `deploy_update()` downloads the zip, then `validate_zip_package()` runs:
+   - `zipfile.is_zipfile()` — archive integrity
+   - `ast.parse()` — every `.py` file must be syntactically valid
+   - `json.loads()` — every `.json` file must parse
+   - Required files present: `host.json`, `VERSION`, `AutoUpdater/__init__.py`, `AutoUpdater/function.json`, `shared/updater.py`, `requirements.txt`
+7. **Deploy:** Only if validation passes, POST to Azure ARM `/zipdeploy` using the Function App's Managed Identity.
+8. **Post-deploy health check:** After a successful deploy, ping `https://{site}.azurewebsites.net/api/health` up to 3 times (with 20s warm-up + 30s between attempts) and write an `auto_update_health_check` audit event. Informational only — there is no automatic rollback; recovery is "revert + new release" or `PINNED_VERSION`.
 
-2. **Compare:** `is_update_available(local_version, remote_version)` compares semver strings (from `VERSION` file vs remote)
+Every AutoUpdater run writes an `auto_update_run` audit event (via `debug_logger.log_event`) so operators can reconstruct history even if the new build breaks its own logging.
 
-3. **Deploy:** If newer version found and auto-apply enabled, `deploy_update(package_url)` downloads the zip and deploys via Azure ARM zipdeploy API using the function app's Managed Identity
+### Safety / Rollout Controls
 
-The current version is stored in the `VERSION` file at the project root (current: `1.0.0`).
+All four are app-settings overrides; no redeploy is needed to change them.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `SKIP_AUTO_UPDATE` | `false` | When `true`, AutoUpdater returns `action=disabled` without contacting GitHub. Emergency switch. |
+| `PINNED_VERSION` | *(unset)* | When set to e.g. `1.2.3`, only that exact version may be deployed. Lets you roll back or freeze prod without touching code. |
+| `UPDATE_CHANNEL` | `stable` | `stable` refuses pre-releases (by version-string suffix or GitHub's `prerelease` flag). `prerelease` accepts alpha/beta/rc. Use the latter in test environments. |
+| `MIN_RELEASE_AGE_MINUTES` | `60` | Defer releases younger than N minutes. Set to `0` on test environments for instant pickup. |
+
+**Recommended per-environment configuration:**
+
+| Environment | Settings |
+|---|---|
+| Customer / prod | Defaults (stable, 60 min age gate) |
+| Test / staging | `UPDATE_CHANNEL=prerelease`, `MIN_RELEASE_AGE_MINUTES=0` |
+| Frozen prod | `PINNED_VERSION=<known-good>` |
+| Incident response | `SKIP_AUTO_UPDATE=true` |
+
+### Release workflow for mixed stable + pre-release
+
+1. Tag a pre-release: `v1.3.0-alpha.1`; on the GitHub release form check **"Set as a pre-release"** → test env picks it up; customers skip it.
+2. Promote to stable: tag `v1.3.0` with the pre-release box **unchecked** → customers pick it up once it's ≥60 minutes old.
+3. If broken: delete the release on GitHub before the age gate opens, or set `PINNED_VERSION=<previous>` on affected apps.
+
+The current version is stored in the `VERSION` file at the project root.
 
 ### Site24x7 Data Centers
 
@@ -1592,6 +1629,10 @@ curl http://localhost:7071/api/debug
 | `GENERAL_LOGTYPE_ENABLED` | No | `true`/`false` — enable general fallback config (default: `false`) |
 | `S247_GENERAL_LOGTYPE` | No | Base64-encoded general logtype sourceConfig |
 | `UPDATE_CHECK_URL` | No | URL or `owner/repo` shorthand for auto-update checks |
+| `UPDATE_CHANNEL` | No | `stable` (default) or `prerelease` — controls whether alpha/beta builds are accepted |
+| `PINNED_VERSION` | No | If set, AutoUpdater only deploys this exact version (rollback / freeze) |
+| `SKIP_AUTO_UPDATE` | No | `true` disables AutoUpdater entirely — emergency switch |
+| `MIN_RELEASE_AGE_MINUTES` | No | Grace period before a new release is eligible (default: `60`) |
 | `SITE24X7_UPLOAD_DOMAIN` | No | Override upload endpoint (for testing with mock server) |
 | `SITE24X7_PROXY_URL` | No | Route API calls through proxy (testing only) |
 | `SAFE_DELETE_MAX_AGE_DAYS` | No | Days to keep unprocessed blobs before cleanup (default: 7) |
