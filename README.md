@@ -127,7 +127,9 @@ No Event Hubs needed — storage-based polling eliminates the ~$11/region/month 
 │   └── sample_blobs/         ← Sample Azure diagnostic log blobs
 ├── docs/
 │   ├── architecture-document.md
-│   └── developer-guide.md
+│   ├── developer-guide.md
+│   ├── troubleshooting-guide.md
+│   └── security-overview.md       ← Customer-facing security brief
 └── .github/workflows/
     └── release-function-app.yml  ← CI/CD: auto-release on VERSION bump
 ```
@@ -166,6 +168,12 @@ Check GitHub's "Set as a pre-release" box when creating alpha/beta tags. With de
 3. Next AutoUpdater run reconciles to the pinned/latest-stable version.
 
 Every AutoUpdater run writes audit events (`auto_update_run`, `auto_update_health_check`) visible via the debug-logs endpoint.
+
+## Security
+
+The collector runs entirely inside your Azure tenant, uses Managed Identity (no stored credentials), has least-privilege RBAC, and is open-source.
+
+See **[docs/security-overview.md](docs/security-overview.md)** for a customer-facing security brief covering: trust boundary, RBAC, data path & residency, self-update controls, logging & auditability, uninstall, and answers to common security questions.
 
 ## Development
 
