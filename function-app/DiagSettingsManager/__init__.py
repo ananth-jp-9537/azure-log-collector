@@ -871,4 +871,29 @@ def main(timer: func.TimerRequest) -> None:
     if not auto_scan:
         logging.info("DiagSettingsManager: Auto-scan is DISABLED — skipping scheduled scan")
         return
+
+    # Concurrency guard: skip if another scan is already in progress.
+    # A stale flag older than the TTL (see try_acquire_scan_lock) is treated
+    # as a crashed scan and overwritten.
+    try:
+        from shared.config_store import try_acquire_scan_lock
+        if not try_acquire_scan_lock():
+            logging.info(
+                "DiagSettingsManager: Another scan is in progress — skipping"
+            )
+            try:
+                from shared.debug_logger import log_event
+                log_event("info", "DiagSettingsManager",
+                          "Scheduled scan skipped — concurrent scan in progress")
+            except Exception:
+                pass
+            return
+    except Exception as guard_err:
+        # If the guard itself fails, fall through to the scan — the old
+        # behaviour is preferable to silently skipping every scheduled run.
+        logging.warning(
+            "DiagSettingsManager: scan lock check failed (%s) — proceeding",
+            guard_err,
+        )
+
     run_scan()

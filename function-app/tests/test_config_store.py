@@ -155,27 +155,29 @@ class TestDisabledLogTypes:
         result = config_store.get_disabled_log_types()
         assert result == ["AuditLogs", "SignInLogs"]
 
-    @patch("shared.config_store._write_blob")
-    @patch("shared.config_store._read_blob")
-    def test_disable_log_type(self, mock_read, mock_write):
-        mock_read.return_value = json.dumps(["Existing"])
-        mock_write.return_value = True
+    @patch("shared.config_store._rmw_blob")
+    def test_disable_log_type(self, mock_rmw):
+        mock_rmw.return_value = ["Existing", "NewCat"]
         assert config_store.disable_log_type("NewCat") is True
+        # Ensure mutate appended the new category
+        mutate = mock_rmw.call_args.args[1]
+        assert mutate(["Existing"]) == ["Existing", "NewCat"]
 
-    @patch("shared.config_store._write_blob")
-    @patch("shared.config_store._read_blob")
-    def test_disable_already_disabled(self, mock_read, mock_write):
-        mock_read.return_value = json.dumps(["AuditLogs"])
-        # Already disabled (case-insensitive) — should not save
+    @patch("shared.config_store._rmw_blob")
+    def test_disable_already_disabled(self, mock_rmw):
+        mock_rmw.return_value = None  # simulates abort (already present)
+        # Still returns True — idempotent
         assert config_store.disable_log_type("auditlogs") is True
-        mock_write.assert_not_called()
+        # Verify mutate returns None for already-disabled
+        mutate = mock_rmw.call_args.args[1]
+        assert mutate(["AuditLogs"]) is None
 
-    @patch("shared.config_store._write_blob")
-    @patch("shared.config_store._read_blob")
-    def test_enable_log_type(self, mock_read, mock_write):
-        mock_read.return_value = json.dumps(["AuditLogs", "SignInLogs"])
-        mock_write.return_value = True
+    @patch("shared.config_store._rmw_blob")
+    def test_enable_log_type(self, mock_rmw):
+        mock_rmw.return_value = ["SignInLogs"]
         assert config_store.enable_log_type("AuditLogs") is True
+        mutate = mock_rmw.call_args.args[1]
+        assert mutate(["AuditLogs", "SignInLogs"]) == ["SignInLogs"]
 
     def test_is_log_type_disabled(self):
         config_store._cache["disabled_types"] = ["AuditLogs", "SignInLogs"]
@@ -192,27 +194,35 @@ class TestConfiguredResources:
         mock_read.return_value = None
         assert config_store.get_configured_resources() == {}
 
-    @patch("shared.config_store._write_blob")
-    @patch("shared.config_store._read_blob")
-    def test_mark_resource_configured(self, mock_read, mock_write):
-        mock_read.return_value = json.dumps({})
-        mock_write.return_value = True
+    @patch("shared.config_store._rmw_blob")
+    def test_mark_resource_configured(self, mock_rmw):
+        mock_rmw.return_value = {"/sub/rg/res1": {"categories": ["AuditLogs"]}}
         result = config_store.mark_resource_configured(
             "/sub/rg/res1", ["AuditLogs"], "sa1"
         )
         assert result is True
+        mutate = mock_rmw.call_args.args[1]
+        out = mutate({})
+        assert "/sub/rg/res1" in out
+        assert out["/sub/rg/res1"]["categories"] == ["AuditLogs"]
 
-    @patch("shared.config_store._write_blob")
-    def test_unmark_resource(self, mock_write):
-        mock_write.return_value = True
+    @patch("shared.config_store._rmw_blob")
+    def test_unmark_resource(self, mock_rmw):
+        mock_rmw.return_value = {}
         config_store._cache["configured_resources"] = {
             "/res1": {"categories": ["A"], "storage_account": "sa1"}
         }
         assert config_store.unmark_resource_configured("/res1") is True
+        mutate = mock_rmw.call_args.args[1]
+        assert mutate({"/res1": {"x": 1}}) == {}
 
-    def test_unmark_resource_not_tracked(self):
+    @patch("shared.config_store._rmw_blob")
+    def test_unmark_resource_not_tracked(self, mock_rmw):
+        mock_rmw.return_value = None  # abort
         config_store._cache["configured_resources"] = {}
         assert config_store.unmark_resource_configured("/nonexistent") is True
+        mutate = mock_rmw.call_args.args[1]
+        assert mutate({}) is None
 
 
 # ─── Cache ───────────────────────────────────────────────────────────────────
@@ -229,3 +239,89 @@ class TestClearCache:
         assert config_store._cache["disabled_types"] is None
         assert config_store._cache["logtype_configs"] == {}
         assert config_store._cache["configured_resources"] is None
+
+
+# ─── RMW helper + scan lock ─────────────────────────────────────────────────
+
+
+class TestRmwBlob:
+    @patch("shared.config_store._write_blob_conditional")
+    @patch("shared.config_store._read_blob_with_etag")
+    def test_rmw_succeeds_first_try(self, mock_read, mock_write):
+        mock_read.return_value = (json.dumps([1, 2]), "etag-a")
+        mock_write.return_value = (True, False)
+        result = config_store._rmw_blob("x", lambda c: c + [3], default=[])
+        assert result == [1, 2, 3]
+        # etag passed through
+        assert mock_write.call_args.args[2] == "etag-a"
+
+    @patch("shared.config_store._write_blob_conditional")
+    @patch("shared.config_store._read_blob_with_etag")
+    def test_rmw_retries_on_conflict(self, mock_read, mock_write):
+        # First read: [1]; conflict on write. Second read: [1, 2]; success.
+        mock_read.side_effect = [
+            (json.dumps([1]), "etag-a"),
+            (json.dumps([1, 2]), "etag-b"),
+        ]
+        mock_write.side_effect = [(False, True), (True, False)]
+        result = config_store._rmw_blob("x", lambda c: c + [99], default=[])
+        assert result == [1, 2, 99]  # mutator saw fresh [1,2] after conflict
+        assert mock_read.call_count == 2
+        assert mock_write.call_count == 2
+
+    @patch("shared.config_store._write_blob_conditional")
+    @patch("shared.config_store._read_blob_with_etag")
+    def test_rmw_aborts_on_mutator_none(self, mock_read, mock_write):
+        mock_read.return_value = (json.dumps([1]), "etag-a")
+        result = config_store._rmw_blob("x", lambda c: None, default=[])
+        assert result is None
+        mock_write.assert_not_called()
+
+    @patch("shared.config_store._write_blob_conditional")
+    @patch("shared.config_store._read_blob_with_etag")
+    def test_rmw_gives_up_after_max_retries(self, mock_read, mock_write):
+        mock_read.return_value = (json.dumps([]), "e")
+        mock_write.return_value = (False, True)  # always conflicts
+        result = config_store._rmw_blob(
+            "x", lambda c: c + [1], default=[], max_retries=3
+        )
+        assert result is None
+        assert mock_write.call_count == 3
+
+
+class TestScanLock:
+    @patch("shared.config_store._rmw_blob")
+    def test_acquire_when_idle(self, mock_rmw):
+        # Simulate RMW applying the mutate
+        def fake_rmw(path, mutate, default=None, max_retries=5):
+            result = mutate(default if default is not None else {})
+            return result
+
+        mock_rmw.side_effect = fake_rmw
+        assert config_store.try_acquire_scan_lock() is True
+
+    @patch("shared.config_store._rmw_blob")
+    def test_skip_when_scan_active(self, mock_rmw):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        def fake_rmw(path, mutate, default=None, max_retries=5):
+            # Active recent scan
+            return mutate({"in_progress": True, "scan_started_at": now})
+
+        mock_rmw.side_effect = fake_rmw
+        assert config_store.try_acquire_scan_lock() is False
+
+    @patch("shared.config_store._rmw_blob")
+    def test_overrides_stale_lock(self, mock_rmw):
+        from datetime import datetime, timezone, timedelta
+
+        stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+        def fake_rmw(path, mutate, default=None, max_retries=5):
+            return mutate({"in_progress": True, "scan_started_at": stale})
+
+        mock_rmw.side_effect = fake_rmw
+        # Stale > 15 min — should take lock
+        assert config_store.try_acquire_scan_lock(ttl_seconds=900) is True

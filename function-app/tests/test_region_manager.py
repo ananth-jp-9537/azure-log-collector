@@ -133,8 +133,11 @@ class TestDeprovisionStorageAccount:
         with patch("shared.region_manager.StorageManagementClient") as mock_cls:
             mock_cls.return_value.storage_accounts.delete.side_effect = Exception("Locked")
             with patch.object(rm, "remove_lock", return_value=True):
-                with patch.object(rm, "_has_recent_blobs", return_value=False):
-                    assert rm.deprovision_storage_account("rg", "eastus", "sa-name") is False
+                with patch.object(rm, "apply_lock", return_value=True) as mock_apply:
+                    with patch.object(rm, "_has_recent_blobs", return_value=False):
+                        assert rm.deprovision_storage_account("rg", "eastus", "sa-name") is False
+                        # Lock must be restored after failure
+                        mock_apply.assert_called_once()
 
     def test_skips_if_recent_blobs(self, rm):
         with patch("shared.region_manager.StorageManagementClient"):

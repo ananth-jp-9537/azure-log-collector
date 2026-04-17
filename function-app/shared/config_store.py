@@ -8,8 +8,10 @@ and atomic writes.
 import json
 import logging
 import os
-from typing import Dict, List, Optional
+import time
+from typing import Callable, Dict, List, Optional, Tuple
 
+from azure.core import MatchConditions
 from azure.storage.blob import BlobServiceClient
 
 logger = logging.getLogger(__name__)
@@ -50,20 +52,28 @@ def _ensure_container(service_client: BlobServiceClient) -> None:
 
 
 def _read_blob(blob_path: str) -> Optional[str]:
+    text, _etag = _read_blob_with_etag(blob_path)
+    return text
+
+
+def _read_blob_with_etag(blob_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (text, etag). (None, None) if missing or error."""
     service_client = _get_service_client()
     if not service_client:
-        return None
+        return None, None
     try:
         blob_client = service_client.get_blob_client(
             container=CONTAINER_NAME, blob=blob_path
         )
-        return blob_client.download_blob().readall().decode("utf-8")
+        stream = blob_client.download_blob()
+        etag = getattr(stream.properties, "etag", None)
+        return stream.readall().decode("utf-8"), etag
     except Exception as e:
         if "BlobNotFound" in str(e) or "not found" in str(e).lower():
             logger.debug("Blob not found: %s", blob_path)
         else:
             logger.error("Failed to read blob %s: %s", blob_path, e)
-        return None
+        return None, None
 
 
 def _write_blob(blob_path: str, data: str) -> bool:
@@ -80,6 +90,96 @@ def _write_blob(blob_path: str, data: str) -> bool:
     except Exception as e:
         logger.error("Failed to write blob %s: %s", blob_path, e)
         return False
+
+
+def _write_blob_conditional(
+    blob_path: str, data: str, etag: Optional[str]
+) -> Tuple[bool, bool]:
+    """Conditional write.
+
+    Returns ``(success, conflict)``. If ``etag`` is ``None``, uses IfNoneMatch=*
+    so the write only succeeds if the blob does not exist. If ``etag`` is
+    provided, uses IfMatch to ensure no one else wrote between our read and
+    our write. ``conflict=True`` means the pre-condition failed and the caller
+    should retry (re-read, re-apply mutation, re-write).
+    """
+    service_client = _get_service_client()
+    if not service_client:
+        return False, False
+    try:
+        _ensure_container(service_client)
+        blob_client = service_client.get_blob_client(
+            container=CONTAINER_NAME, blob=blob_path
+        )
+        if etag:
+            blob_client.upload_blob(
+                data,
+                overwrite=True,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+        else:
+            blob_client.upload_blob(
+                data,
+                overwrite=True,
+                match_condition=MatchConditions.IfMissing,
+            )
+        return True, False
+    except Exception as e:
+        msg = str(e)
+        if (
+            "ConditionNotMet" in msg
+            or "BlobAlreadyExists" in msg
+            or "412" in msg
+            or "409" in msg
+        ):
+            return False, True
+        logger.error("Conditional write failed for %s: %s", blob_path, e)
+        return False, False
+
+
+def _rmw_blob(
+    blob_path: str,
+    mutate: Callable[[Optional[Dict]], Optional[Dict]],
+    max_retries: int = 5,
+    default: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """Read-modify-write a JSON blob with ETag-based optimistic concurrency.
+
+    ``mutate`` receives the current parsed JSON (or ``default`` if the blob is
+    absent) and must return the new value to persist. Returning ``None`` aborts
+    the write (no-op). Retries on ETag conflict up to ``max_retries``.
+    Returns the persisted value, or ``None`` on failure/abort.
+    """
+    for attempt in range(max_retries):
+        raw, etag = _read_blob_with_etag(blob_path)
+        if raw is not None:
+            try:
+                current = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.error("Corrupt JSON in %s — treating as empty", blob_path)
+                current = default
+        else:
+            current = default
+
+        new_value = mutate(current)
+        if new_value is None:
+            return None  # caller aborted
+
+        serialized = json.dumps(new_value, indent=2)
+        success, conflict = _write_blob_conditional(blob_path, serialized, etag)
+        if success:
+            return new_value
+        if not conflict:
+            return None
+        # Conflict — retry with fresh read. Short jitter to reduce thrash.
+        time.sleep(0.05 * (attempt + 1))
+    logger.warning(
+        "RMW gave up on %s after %d retries (concurrent contention)",
+        blob_path,
+        max_retries,
+    )
+    return None
 
 
 def _delete_blob(blob_path: str) -> bool:
@@ -226,21 +326,33 @@ def save_disabled_log_types(disabled: List[str]) -> bool:
 
 
 def disable_log_type(category: str) -> bool:
-    """Add a category to the disabled list."""
-    disabled = get_disabled_log_types()
-    normalized = category.lower()
-    if normalized not in [d.lower() for d in disabled]:
-        disabled.append(category)
-        return save_disabled_log_types(disabled)
+    """Add a category to the disabled list (concurrency-safe)."""
+    def mutate(current):
+        disabled = current if isinstance(current, list) else []
+        if category.lower() in [d.lower() for d in disabled]:
+            return None  # already present — abort write
+        return disabled + [category]
+
+    result = _rmw_blob(DISABLED_TYPES_BLOB, mutate, default=[])
+    if result is not None:
+        _cache["disabled_types"] = result
+        return True
+    # None may mean abort-no-op (already present) OR failure. Check cache.
     return True
 
 
 def enable_log_type(category: str) -> bool:
-    """Remove a category from the disabled list."""
-    disabled = get_disabled_log_types()
-    updated = [d for d in disabled if d.lower() != category.lower()]
-    if len(updated) != len(disabled):
-        return save_disabled_log_types(updated)
+    """Remove a category from the disabled list (concurrency-safe)."""
+    def mutate(current):
+        disabled = current if isinstance(current, list) else []
+        updated = [d for d in disabled if d.lower() != category.lower()]
+        if len(updated) == len(disabled):
+            return None  # not present — abort
+        return updated
+
+    result = _rmw_blob(DISABLED_TYPES_BLOB, mutate, default=[])
+    if result is not None:
+        _cache["disabled_types"] = result
     return True
 
 
@@ -298,24 +410,40 @@ def save_category_resource_types(mapping: Dict) -> bool:
 def mark_resource_configured(
     resource_id: str, categories: List[str], storage_account: str
 ) -> bool:
-    """Mark a resource as configured with its categories and target storage account."""
+    """Mark a resource as configured (concurrency-safe RMW)."""
     from datetime import datetime, timezone
 
-    configured = get_configured_resources()
-    configured[resource_id] = {
+    entry = {
         "categories": categories,
         "storage_account": storage_account,
         "configured_at": datetime.now(timezone.utc).isoformat(),
     }
-    return save_configured_resources(configured)
+
+    def mutate(current):
+        configured = current if isinstance(current, dict) else {}
+        configured[resource_id] = entry
+        return configured
+
+    result = _rmw_blob(CONFIGURED_RESOURCES_BLOB, mutate, default={})
+    if result is not None:
+        _cache["configured_resources"] = result
+        return True
+    return False
 
 
 def unmark_resource_configured(resource_id: str) -> bool:
-    """Remove a resource from the configured tracking."""
-    configured = get_configured_resources()
-    if resource_id in configured:
+    """Remove a resource from the configured tracking (concurrency-safe RMW)."""
+    def mutate(current):
+        configured = current if isinstance(current, dict) else {}
+        if resource_id not in configured:
+            return None  # not present — abort
+        configured = dict(configured)
         del configured[resource_id]
-        return save_configured_resources(configured)
+        return configured
+
+    result = _rmw_blob(CONFIGURED_RESOURCES_BLOB, mutate, default={})
+    if result is not None:
+        _cache["configured_resources"] = result
     return True
 
 
@@ -332,8 +460,59 @@ def clear_cache():
 # ------------------------------------------------------------------
 
 def save_scan_state(state: Dict) -> bool:
-    """Save scan state (last scan time, stats) to blob storage."""
+    """Save scan state (last scan time, stats) to blob storage.
+
+    Full overwrite — callers replacing the entire state at scan start/end.
+    For partial updates (e.g. clearing ``in_progress``), use
+    :func:`update_scan_state` which is concurrency-safe.
+    """
     return _write_blob(SCAN_STATE_BLOB, json.dumps(state, indent=2))
+
+
+def update_scan_state(patch: Dict) -> Optional[Dict]:
+    """Merge ``patch`` into the current scan state (concurrency-safe RMW)."""
+    def mutate(current):
+        state = dict(current) if isinstance(current, dict) else {}
+        state.update(patch)
+        return state
+
+    return _rmw_blob(SCAN_STATE_BLOB, mutate, default={})
+
+
+def try_acquire_scan_lock(ttl_seconds: int = 900) -> bool:
+    """Atomically mark a scan as in-progress. Returns ``True`` if the caller
+    acquired the lock, ``False`` if another scan is already running.
+
+    A stale ``in_progress`` flag older than ``ttl_seconds`` is treated as a
+    crashed scan and overwritten so a wedged flag can't permanently block
+    future scans.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    acquired = {"acquired": False}
+
+    def mutate(current):
+        state = dict(current) if isinstance(current, dict) else {}
+        if state.get("in_progress"):
+            started = state.get("scan_started_at") or state.get("last_scan_time")
+            if started:
+                try:
+                    started_dt = datetime.fromisoformat(
+                        started.replace("Z", "+00:00")
+                    )
+                    age = (now - started_dt).total_seconds()
+                    if age < ttl_seconds:
+                        return None  # active scan — abort
+                except Exception:
+                    pass
+        state["in_progress"] = True
+        state["scan_started_at"] = now.isoformat()
+        acquired["acquired"] = True
+        return state
+
+    _rmw_blob(SCAN_STATE_BLOB, mutate, default={})
+    return acquired["acquired"]
 
 
 def get_scan_state() -> Dict:

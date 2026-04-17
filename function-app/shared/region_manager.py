@@ -209,10 +209,12 @@ class RegionManager:
 
         lock_nm = f"s247-lock-{_sanitize_region(sa_name)}"
 
-        # 1. Remove lock first
+        # Order:
+        #   1. Remove lock so delete can proceed
+        #   2. Attempt delete
+        #   3. If delete fails, restore the lock so the SA isn't left
+        #      unprotected with unprocessed logs inside it.
         self.remove_lock(resource_group, lock_nm)
-
-        # 2. Delete storage account
         try:
             storage_client.storage_accounts.delete(
                 resource_group_name=resource_group,
@@ -222,6 +224,22 @@ class RegionManager:
             return True
         except Exception as e:
             logger.error(f"Failed to delete storage account '{sa_name}': {e}")
+            # Rollback: re-apply the lock so the SA is not left unprotected.
+            try:
+                self.apply_lock(
+                    resource_group=resource_group,
+                    resource_name=sa_name,
+                    resource_type="Microsoft.Storage/storageAccounts",
+                )
+                logger.warning(
+                    "Re-applied lock on '%s' after delete failure", sa_name
+                )
+            except Exception as relock_err:
+                logger.error(
+                    "Could not restore lock on '%s' after delete failure — "
+                    "storage account is UNPROTECTED: %s",
+                    sa_name, relock_err,
+                )
             return False
 
     def _has_recent_blobs(

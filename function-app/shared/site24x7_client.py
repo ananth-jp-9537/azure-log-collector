@@ -59,7 +59,9 @@ class CircuitBreaker:
             from azure.storage.blob import BlobServiceClient
             blob_service = BlobServiceClient.from_connection_string(conn_str)
             blob_client = blob_service.get_blob_client("s247-config", self.BLOB_NAME)
-            data = json.loads(blob_client.download_blob().readall())
+            stream = blob_client.download_blob()
+            self._etag = getattr(stream.properties, "etag", None)
+            data = json.loads(stream.readall())
             self.state = data.get("state", "closed")
             self.failure_count = data.get("failure_count", 0)
             self.last_failure_time = data.get("last_failure_time", 0.0)
@@ -70,15 +72,22 @@ class CircuitBreaker:
                     max(0, self.recovery_timeout - (time.time() - self.last_failure_time)),
                 )
         except Exception:
-            pass  # No persisted state yet — start fresh
+            self._etag = None  # No persisted state yet — start fresh
 
     def _save_state(self):
-        """Persist state to blob storage."""
+        """Persist state to blob storage with ETag-based concurrency.
+
+        On conflict, re-reads the remote state and merges by taking the
+        higher failure_count + most recent last_failure_time, so concurrent
+        BlobLogProcessor instances don't clobber each other's failure tallies
+        (which could prevent the circuit from ever tripping).
+        """
         try:
             conn_str = os.environ.get("AzureWebJobsStorage", "")
             if not conn_str:
                 return
             from azure.storage.blob import BlobServiceClient
+            from azure.core import MatchConditions
             blob_service = BlobServiceClient.from_connection_string(conn_str)
             container_client = blob_service.get_container_client("s247-config")
             try:
@@ -86,15 +95,50 @@ class CircuitBreaker:
             except Exception:
                 pass
             blob_client = blob_service.get_blob_client("s247-config", self.BLOB_NAME)
-            blob_client.upload_blob(
-                json.dumps({
+
+            etag = getattr(self, "_etag", None)
+            for attempt in range(5):
+                payload = json.dumps({
                     "state": self.state,
                     "failure_count": self.failure_count,
                     "last_failure_time": self.last_failure_time,
                     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                }),
-                overwrite=True,
-            )
+                })
+                try:
+                    if etag:
+                        resp = blob_client.upload_blob(
+                            payload, overwrite=True,
+                            etag=etag,
+                            match_condition=MatchConditions.IfNotModified,
+                        )
+                    else:
+                        resp = blob_client.upload_blob(
+                            payload, overwrite=True,
+                            match_condition=MatchConditions.IfMissing,
+                        )
+                    self._etag = (resp or {}).get("etag") if isinstance(resp, dict) else None
+                    return
+                except Exception as e:
+                    msg = str(e)
+                    if ("ConditionNotMet" in msg or "BlobAlreadyExists" in msg
+                            or "412" in msg or "409" in msg):
+                        # Merge with remote state before retry.
+                        try:
+                            stream = blob_client.download_blob()
+                            etag = getattr(stream.properties, "etag", None)
+                            remote = json.loads(stream.readall())
+                            if remote.get("failure_count", 0) > self.failure_count:
+                                self.failure_count = remote["failure_count"]
+                            if remote.get("last_failure_time", 0) > self.last_failure_time:
+                                self.last_failure_time = remote["last_failure_time"]
+                            # Remote "open" wins unless we're also open.
+                            if remote.get("state") == "open" and self.state == "closed":
+                                self.state = "open"
+                        except Exception:
+                            etag = None
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    return  # non-conflict error — give up silently
         except Exception:
             pass
 

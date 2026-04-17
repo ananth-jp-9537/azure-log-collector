@@ -348,8 +348,14 @@ def _process_all_regions():
 
 def _load_checkpoints(conn_str: str) -> dict:
     """Load blob processing checkpoints from the main storage account."""
+    data, _etag = _load_checkpoints_with_etag(conn_str)
+    return data
+
+
+def _load_checkpoints_with_etag(conn_str: str):
+    """Load checkpoints and return (dict, etag). Creates container if missing."""
     if not conn_str:
-        return {}
+        return {}, None
     try:
         blob_service = BlobServiceClient.from_connection_string(conn_str)
         container_client = blob_service.get_container_client(CHECKPOINT_CONTAINER)
@@ -357,30 +363,80 @@ def _load_checkpoints(conn_str: str) -> dict:
             container_client.create_container()
         except Exception:
             pass
-        blob_data = container_client.download_blob(CHECKPOINT_BLOB).readall()
-        return json.loads(blob_data)
+        stream = container_client.download_blob(CHECKPOINT_BLOB)
+        etag = getattr(stream.properties, "etag", None)
+        return json.loads(stream.readall()), etag
     except Exception:
-        return {}
+        return {}, None
 
 
 def _save_checkpoints(conn_str: str, checkpoints: dict) -> None:
-    """Persist blob processing checkpoints to the main storage account."""
+    """Persist checkpoints with ETag-based merge-on-conflict.
+
+    If another BlobLogProcessor invocation wrote between our read and write,
+    we merge per-account checkpoints by taking the max ISO timestamp so no
+    already-processed blob gets re-uploaded.
+    """
     if not conn_str:
         return
     try:
+        from azure.core import MatchConditions
         blob_service = BlobServiceClient.from_connection_string(conn_str)
         container_client = blob_service.get_container_client(CHECKPOINT_CONTAINER)
         try:
             container_client.create_container()
         except Exception:
             pass
-        container_client.upload_blob(
-            CHECKPOINT_BLOB,
-            json.dumps(checkpoints),
-            overwrite=True,
+        blob_client = container_client.get_blob_client(CHECKPOINT_BLOB)
+
+        local = dict(checkpoints)
+        # Re-read to obtain the current ETag (the original load was at start-of-run).
+        existing, etag = _load_checkpoints_with_etag(conn_str)
+        merged = _merge_checkpoints(existing, local)
+
+        for attempt in range(5):
+            try:
+                if etag:
+                    blob_client.upload_blob(
+                        json.dumps(merged), overwrite=True,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                else:
+                    blob_client.upload_blob(
+                        json.dumps(merged), overwrite=True,
+                        match_condition=MatchConditions.IfMissing,
+                    )
+                return
+            except Exception as e:
+                msg = str(e)
+                if ("ConditionNotMet" in msg or "BlobAlreadyExists" in msg
+                        or "412" in msg or "409" in msg):
+                    existing, etag = _load_checkpoints_with_etag(conn_str)
+                    merged = _merge_checkpoints(existing, local)
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+        logger.error(
+            "BlobLogProcessor: Checkpoint save gave up after retries "
+            "(concurrent contention)"
         )
     except Exception as e:
         logger.error("BlobLogProcessor: Failed to save checkpoints: %s", str(e))
+
+
+def _merge_checkpoints(remote: dict, local: dict) -> dict:
+    """Merge two checkpoint dicts by taking max ISO timestamp per account.
+
+    Checkpoint values are ISO 8601 strings (lexicographically comparable) or
+    empty strings. Unknown accounts from either side are preserved.
+    """
+    merged = dict(remote) if isinstance(remote, dict) else {}
+    for acct, ts in (local or {}).items():
+        prev = merged.get(acct, "")
+        if not prev or (ts and ts > prev):
+            merged[acct] = ts
+    return merged
 
 
 def _cleanup_stale_blobs(blob_service, container_name: str, cutoff, stats: dict):

@@ -30,6 +30,26 @@ def main(msg: func.QueueMessage) -> None:
     except Exception:
         pass
 
+    # Concurrency guard: if a scan is already running (timer-triggered), skip.
+    # The timer path calls try_acquire_scan_lock; the queue path mirrors it so
+    # TriggerScan + scheduled scan can't overlap.
+    try:
+        from shared.config_store import try_acquire_scan_lock
+        if not try_acquire_scan_lock():
+            logging.info("ScanWorker: Another scan in progress — skipping")
+            try:
+                from shared.debug_logger import log_event
+                log_event("info", "ScanWorker",
+                          "On-demand scan skipped — concurrent scan in progress")
+            except Exception:
+                pass
+            return
+    except Exception as guard_err:
+        logging.warning(
+            "ScanWorker: scan lock check failed (%s) — proceeding",
+            guard_err,
+        )
+
     try:
         from DiagSettingsManager import run_scan
 
@@ -56,12 +76,10 @@ def main(msg: func.QueueMessage) -> None:
 def _clear_in_progress(error_msg=None):
     """Clear the in_progress flag so the Dashboard doesn't show stale state."""
     try:
-        from shared.config_store import get_scan_state, save_scan_state
-        state = get_scan_state()
-        if state.get("in_progress"):
-            state["in_progress"] = False
-            if error_msg:
-                state["last_error"] = error_msg
-            save_scan_state(state)
+        from shared.config_store import update_scan_state
+        patch = {"in_progress": False}
+        if error_msg:
+            patch["last_error"] = error_msg
+        update_scan_state(patch)
     except Exception:
         pass

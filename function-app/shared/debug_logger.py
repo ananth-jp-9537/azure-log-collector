@@ -382,15 +382,17 @@ def log_audit(action: str, component: str, details: dict = None,
 
     try:
         blob_client = _get_blob_client(AUDIT_BLOB)
+        if not blob_client:
+            return
+        from azure.core import MatchConditions
         # Use ETag-based optimistic concurrency to prevent lost writes
         # from concurrent function invocations.
         for _attempt in range(3):
             etag = None
             try:
-                props = blob_client.get_blob_properties()
-                etag = props.etag
-                data = blob_client.download_blob().readall()
-                events = json.loads(data)
+                stream = blob_client.download_blob()
+                etag = getattr(stream.properties, "etag", None)
+                events = json.loads(stream.readall())
             except Exception:
                 events = []
                 etag = None
@@ -403,13 +405,19 @@ def log_audit(action: str, component: str, details: dict = None,
                 if etag:
                     blob_client.upload_blob(
                         json.dumps(events), overwrite=True,
-                        etag=etag, match_condition="IfMatch",
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
                     )
                 else:
-                    blob_client.upload_blob(json.dumps(events), overwrite=True)
+                    blob_client.upload_blob(
+                        json.dumps(events), overwrite=True,
+                        match_condition=MatchConditions.IfMissing,
+                    )
                 break  # success
             except Exception as conflict:
-                if "ConditionNotMet" in str(conflict) and _attempt < 2:
+                msg = str(conflict)
+                if ("ConditionNotMet" in msg or "BlobAlreadyExists" in msg
+                        or "412" in msg or "409" in msg) and _attempt < 2:
                     continue  # retry on ETag mismatch
                 raise
     except Exception as e:
