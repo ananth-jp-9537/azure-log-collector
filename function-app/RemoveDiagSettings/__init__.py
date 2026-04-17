@@ -16,6 +16,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     deletes the s247-diag-logs diagnostic setting where it exists.
     """
     logging.info("RemoveDiagSettings: Starting bulk removal of diagnostic settings")
+    caller_ip = req.headers.get("X-Forwarded-For", req.headers.get("REMOTE_ADDR", ""))
 
     try:
         subscription_ids = [
@@ -40,6 +41,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             result["skipped"],
             result["errors"],
         )
+        try:
+            from shared.debug_logger import log_audit
+            log_audit("remove_all_diagnostic_settings", "RemoveDiagSettings",
+                      {"removed": result["removed"], "skipped": result["skipped"],
+                       "errors": result["errors"]}, caller_ip)
+        except Exception:
+            pass
 
         # Disable auto-scan to prevent the next timer from recreating settings
         try:
@@ -60,7 +68,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("RemoveDiagSettings: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to remove diagnostic settings"}),
             mimetype="application/json",
             status_code=500,
         )

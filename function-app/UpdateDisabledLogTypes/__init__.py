@@ -41,13 +41,53 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             status_code=400,
         )
 
-    action = body.get("action", "").lower()
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({"error": "Body must be a JSON object"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+
+    action = str(body.get("action", "")).lower()
     category = body.get("category", "")
     categories = body.get("categories", [])
 
     if action not in ("disable", "enable"):
         return func.HttpResponse(
             json.dumps({"error": "action must be 'disable' or 'enable'"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+
+    # Validate category/categories types and length
+    _MAX_CAT_LEN = 200
+    if category and not isinstance(category, str):
+        return func.HttpResponse(
+            json.dumps({"error": "'category' must be a string"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+    if category and len(category) > _MAX_CAT_LEN:
+        return func.HttpResponse(
+            json.dumps({"error": f"'category' exceeds maximum length of {_MAX_CAT_LEN}"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+    if not isinstance(categories, list) or any(not isinstance(c, str) for c in categories):
+        return func.HttpResponse(
+            json.dumps({"error": "'categories' must be an array of strings"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+    if len(categories) > 200:
+        return func.HttpResponse(
+            json.dumps({"error": "'categories' exceeds maximum of 200 items"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+    if any(len(c) > _MAX_CAT_LEN for c in categories):
+        return func.HttpResponse(
+            json.dumps({"error": f"'categories' item exceeds maximum length of {_MAX_CAT_LEN}"}),
             mimetype="application/json",
             status_code=400,
         )
@@ -125,7 +165,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("UpdateDisabledLogTypes: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to update disabled log types"}),
             mimetype="application/json",
             status_code=500,
         )

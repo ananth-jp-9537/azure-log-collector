@@ -19,6 +19,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             status_code=400,
         )
 
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({"error": "Body must be a JSON object"}),
+            mimetype="application/json",
+            status_code=400,
+        )
+
     enabled = body.get("enabled")
     if enabled is None:
         return func.HttpResponse(
@@ -50,7 +57,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("UpdateGeneralLogType: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to update general log type"}),
             mimetype="application/json",
             status_code=500,
         )

@@ -175,20 +175,6 @@ class Site24x7Client:
         self.circuit_breaker = CircuitBreaker()
         self.rate_limiter = RateLimiter()
 
-        # ── TESTING ONLY: Zoho Flow Proxy ────────────────────────────────
-        # When SITE24X7_PROXY_URL is set, Site24x7 API calls are routed
-        # through a Zoho Flow webhook with a Deluge custom function that
-        # forwards them to the internal test server.
-        #
-        # TO REVERT FOR PRODUCTION:
-        #   1. Remove/unset the SITE24X7_PROXY_URL env var
-        #   2. That's it — no code changes needed. All proxy logic is
-        #      bypassed when this env var is absent.
-        # ─────────────────────────────────────────────────────────────────
-        self.proxy_url = os.environ.get("SITE24X7_PROXY_URL", "")
-        if self.proxy_url:
-            logger.info("PROXY MODE ACTIVE — routing via %s", self.proxy_url)
-
     def _make_s247_request(
         self, path: str, params: Optional[Dict] = None, method: str = "GET"
     ) -> Optional[Dict]:
@@ -200,11 +186,6 @@ class Site24x7Client:
         url_params = {"deviceKey": self.device_key}
         if params:
             url_params.update(params)
-
-        # ── TESTING ONLY: Route through Zoho Flow proxy ──────────────────
-        if self.proxy_url:
-            return self._proxy_api_request(path, url_params, method)
-        # ─────────────────────────────────────────────────────────────────
 
         url = f"{self._get_api_base_url()}{path}?{urllib.parse.urlencode(url_params)}"
 
@@ -224,45 +205,6 @@ class Site24x7Client:
             except Exception:
                 pass
             return None
-
-    # ── TESTING ONLY: Proxy Methods ──────────────────────────────────────
-    # Routes requests through a Zoho Flow webhook with a Deluge custom
-    # function that forwards them to the internal test server.
-    #
-    # TO REVERT FOR PRODUCTION: Just unset SITE24X7_PROXY_URL env var.
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _proxy_api_request(
-        self, path: str, params: Dict, method: str
-    ) -> Optional[Dict]:
-        """Route an API request through the Zoho Flow proxy.
-
-        Sends a JSON payload describing the request to the webhook.
-        The Deluge custom function builds the URL and calls invokeurl.
-        """
-        payload = json.dumps({
-            "request_type": "api",
-            "method": method,
-            "path": path,
-            "params": params,
-            "base_url": self.s247_base_url,
-        }).encode("utf-8")
-
-        try:
-            req = urllib.request.Request(
-                self.proxy_url,
-                data=payload,
-                method="POST",
-            )
-            req.add_header("Content-Type", "application/json")
-            req.add_header("Accept", "application/json")
-            resp = urllib.request.urlopen(req, timeout=60)
-            return json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            logger.error("Proxy API request failed (%s): %s", path, e)
-            return None
-
-    # ── END TESTING ONLY ─────────────────────────────────────────────────
 
     # ─── Azure Log Type Management ───────────────────────────────────────
 
@@ -556,11 +498,8 @@ class Site24x7Client:
             log_events: Raw log event records from Azure diagnostic logs
         """
         if not self.circuit_breaker.can_execute():
-            # Blob-based uploads bypass the circuit breaker since they don't
-            # go through the HTTP relay (no cold-start timeout risk)
-            if not os.environ.get("RELAY_UPLOAD_CONN_STR"):
-                logger.warning("Circuit breaker OPEN — skipping log POST")
-                return False
+            logger.warning("Circuit breaker OPEN — skipping log POST")
+            return False
 
         self.rate_limiter.acquire()
 
@@ -852,17 +791,7 @@ def _json_log_parser(
 
 
 def _send_logs_to_s247(config: Dict, gzipped_data: bytes, log_size: int) -> None:
-    """POST gzipped log data to Site24x7 upload endpoint.
-
-    If RELAY_UPLOAD_CONN_STR is set, writes upload as a blob to the relay
-    storage account (bypasses HTTP relay for much faster uploads).
-    Otherwise, POSTs directly to the upload domain via HTTP.
-    """
-    relay_conn = os.environ.get("RELAY_UPLOAD_CONN_STR", "")
-    if relay_conn:
-        _send_logs_via_blob(config, gzipped_data, log_size, relay_conn)
-        return
-
+    """POST gzipped log data to Site24x7 upload endpoint."""
     header_obj = {
         "X-DeviceKey": config["apiKey"],
         "X-LogType": config["logType"],
@@ -873,11 +802,7 @@ def _send_logs_to_s247(config: Dict, gzipped_data: bytes, log_size: int) -> None
         "User-Agent": "AZURE-DiagLogs-Function",
     }
     upload_domain = config['uploadDomain']
-    # Support http:// for local mock server testing
-    if upload_domain.startswith("http://") or upload_domain.startswith("https://"):
-        upload_url = f"{upload_domain}/upload"
-    else:
-        upload_url = f"https://{upload_domain}/upload"
+    upload_url = f"https://{upload_domain}/upload"
     request = urllib.request.Request(upload_url, headers=header_obj)
     response = urllib.request.urlopen(request, data=gzipped_data, timeout=120)
     resp_headers = dict(response.getheaders())
@@ -892,27 +817,3 @@ def _send_logs_to_s247(config: Dict, gzipped_data: bytes, log_size: int) -> None
             response.status,
             response.read(),
         )
-
-
-def _send_logs_via_blob(config: Dict, gzipped_data: bytes, log_size: int, conn_str: str) -> None:
-    """Write upload as a blob to relay storage (bypasses HTTP relay cold starts)."""
-    from azure.storage.blob import BlobServiceClient
-
-    log_type = config["logType"]
-    upload_id = f"BLOB-{int(time.time()*1000)}"
-    blob_name = f"{upload_id}_{log_type}.gz"
-
-    metadata = {
-        "logtype": log_type,
-        "devicekey": config["apiKey"],
-        "logsize": str(log_size),
-        "uploadid": upload_id,
-        "uploaddomain": config["uploadDomain"],
-    }
-
-    blob_service = BlobServiceClient.from_connection_string(conn_str)
-    blob_client = blob_service.get_blob_client("log-uploads", blob_name)
-    blob_client.upload_blob(gzipped_data, metadata=metadata)
-
-    logger.info("%s: Logs written to relay blob (%s, %d bytes gzipped)",
-                upload_id, log_type, len(gzipped_data))

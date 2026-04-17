@@ -16,6 +16,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     without forwarding logs to Site24x7.
     """
     logging.info("StopProcessing: Updating processing state")
+    caller_ip = req.headers.get("X-Forwarded-For", req.headers.get("REMOTE_ADDR", ""))
 
     try:
         body = req.get_json()
@@ -44,6 +45,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         action = "enabled" if enabled else "stopped"
         logging.info("StopProcessing: Processing %s", action)
+        try:
+            from shared.debug_logger import log_audit
+            log_audit(f"processing_{action}", "StopProcessing",
+                      {"enabled": enabled}, caller_ip)
+        except Exception:
+            pass
 
         return func.HttpResponse(
             json.dumps({
@@ -57,7 +64,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("StopProcessing: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to update processing state"}),
             mimetype="application/json",
             status_code=500,
         )

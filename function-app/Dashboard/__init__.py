@@ -485,7 +485,7 @@ async function loadStatus() {
     // Subscriptions
     const subEl = document.getElementById('subList');
     if (s.subscription_ids?.length) {
-      subEl.innerHTML = s.subscription_ids.map(id => `<div class="sub-item">${id}</div>`).join('');
+      subEl.innerHTML = s.subscription_ids.map(id => `<div class="sub-item">${esc(id)}</div>`).join('');
     } else {
       subEl.innerHTML = '<span class="stat-label">No subscriptions configured</span>';
     }
@@ -494,7 +494,7 @@ async function loadStatus() {
     const regEl = document.getElementById('regionList');
     if (s.provisioned_regions?.length) {
       regEl.innerHTML = s.provisioned_regions.map(r =>
-        `<div class="region-item"><span class="region-name">${r.region}</span><span class="region-sa">${r.storage_account}</span></div>`
+        `<div class="region-item"><span class="region-name">${esc(r.region)}</span><span class="region-sa">${esc(r.storage_account)}</span></div>`
       ).join('');
     } else {
       regEl.innerHTML = '<span class="stat-label">No regions provisioned yet</span>';
@@ -516,7 +516,7 @@ async function loadStatus() {
     }
     if (allErrors.length) {
       errCard.style.display = 'block';
-      errEl.innerHTML = allErrors.map(e => `<div class="error-item">${e}</div>`).join('');
+      errEl.innerHTML = allErrors.map(e => `<div class="error-item">${esc(e)}</div>`).join('');
     } else {
       errCard.style.display = 'none';
     }
@@ -1265,4 +1265,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
+    # Security headers
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'unsafe-inline'; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return resp

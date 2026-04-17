@@ -180,12 +180,23 @@ def validate_config() -> List[Dict]:
                 "field": var,
                 "message": f"Not set — {desc}",
             })
-        elif var == "SITE24X7_API_KEY" and val in ("vuvuvi", "test", "changeme"):
-            issues.append({
-                "level": "error",
-                "field": var,
-                "message": "Placeholder value — set a real Site24x7 API key",
-            })
+        elif var == "SITE24X7_API_KEY":
+            # Device keys follow patterns like ab_<hex>, aa_<hex>, in_<hex>
+            import re
+            _placeholders = {"vuvuvi", "test", "changeme", "placeholder",
+                             "dummy", "xxx", "your-key-here", "TODO"}
+            if val in _placeholders:
+                issues.append({
+                    "level": "error",
+                    "field": var,
+                    "message": "Placeholder value — set a real Site24x7 device key",
+                })
+            elif len(val) < 20 or not re.match(r"^[a-z]{2}_[a-f0-9]{20,}$", val):
+                issues.append({
+                    "level": "warning",
+                    "field": var,
+                    "message": "Value does not match expected device key format (e.g., ab_<hex>, in_<hex>)",
+                })
 
     # Storage connection
     if not os.environ.get("AzureWebJobsStorage"):
@@ -343,3 +354,74 @@ def test_s247_connectivity() -> Dict:
         results["error"] = "; ".join(errors)
 
     return results
+
+
+# ─── Audit Logging ──────────────────────────────────────────────────────────
+
+AUDIT_BLOB = "config/audit-log.json"
+MAX_AUDIT_EVENTS = 500
+
+
+def log_audit(action: str, component: str, details: dict = None,
+              caller_ip: str = None) -> None:
+    """Log a destructive or sensitive operation to a persistent audit trail.
+
+    Called from write endpoints (UpdateIgnoreList, RemoveDiagSettings,
+    StopProcessing, UpdateSettings, UpdateDisabledLogTypes) to record
+    WHO did WHAT and WHEN.
+    """
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "component": component,
+    }
+    if caller_ip:
+        event["caller_ip"] = caller_ip
+    if details:
+        event["details"] = details
+
+    try:
+        blob_client = _get_blob_client(AUDIT_BLOB)
+        # Use ETag-based optimistic concurrency to prevent lost writes
+        # from concurrent function invocations.
+        for _attempt in range(3):
+            etag = None
+            try:
+                props = blob_client.get_blob_properties()
+                etag = props.etag
+                data = blob_client.download_blob().readall()
+                events = json.loads(data)
+            except Exception:
+                events = []
+                etag = None
+
+            events.append(event)
+            if len(events) > MAX_AUDIT_EVENTS:
+                events = events[-MAX_AUDIT_EVENTS:]
+
+            try:
+                if etag:
+                    blob_client.upload_blob(
+                        json.dumps(events), overwrite=True,
+                        etag=etag, match_condition="IfMatch",
+                    )
+                else:
+                    blob_client.upload_blob(json.dumps(events), overwrite=True)
+                break  # success
+            except Exception as conflict:
+                if "ConditionNotMet" in str(conflict) and _attempt < 2:
+                    continue  # retry on ETag mismatch
+                raise
+    except Exception as e:
+        logger.warning("Failed to write audit log: %s", e)
+
+
+def get_audit_log(limit: int = 50) -> list:
+    """Retrieve recent audit events."""
+    try:
+        blob_client = _get_blob_client(AUDIT_BLOB)
+        data = blob_client.download_blob().readall()
+        events = json.loads(data)
+        return events[-limit:]
+    except Exception:
+        return []

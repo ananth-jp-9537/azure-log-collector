@@ -57,7 +57,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logger.error("GetConfiguredResources: Error: %s", e)
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to load configured resources"}),
             mimetype="application/json",
             status_code=500,
         )

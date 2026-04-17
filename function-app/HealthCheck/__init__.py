@@ -1,6 +1,7 @@
 """Minimal health check — no shared imports, no SDK dependencies."""
 import json
 import os
+import sys
 import logging
 
 import azure.functions as func
@@ -33,13 +34,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             __import__(mod_name)
             deps[mod_name] = "ok"
         except Exception as e:
-            deps[mod_name] = f"FAILED: {e}"
+            deps[mod_name] = f"FAILED: {type(e).__name__}"
 
     result = {
         "status": "alive",
-        "python_version": os.popen("python --version 2>&1").read().strip(),
-        "env_keys": sorted([k for k in os.environ if k.startswith(("AZURE", "FUNCTIONS", "WEBSITE", "SUBSCRIPTION", "RESOURCE", "PROCESSING", "SITE24X7", "DIAG_STORAGE", "UPDATE"))]),
+        "python_version": f"Python {sys.version.split()[0]}",
         "dependencies": deps,
+        "deps_ok": all(v == "ok" for v in deps.values()),
     }
 
     # If azure_test param is set, test actual Azure API calls

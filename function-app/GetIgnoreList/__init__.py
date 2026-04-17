@@ -66,7 +66,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("GetIgnoreList: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to load ignore list"}),
             mimetype="application/json",
             status_code=500,
         )

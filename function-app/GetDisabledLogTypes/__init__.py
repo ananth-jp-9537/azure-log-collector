@@ -79,7 +79,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("GetDisabledLogTypes: Error: %s", str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to load disabled log types"}),
             mimetype="application/json",
             status_code=500,
         )

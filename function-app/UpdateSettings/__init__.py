@@ -43,6 +43,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     # PUT
     logging.info("UpdateSettings: Updating setting")
+    caller_ip = req.headers.get("X-Forwarded-For", req.headers.get("REMOTE_ADDR", ""))
 
     try:
         body = req.get_json()
@@ -107,6 +108,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         os.environ[key] = str_value
 
         logging.info("UpdateSettings: Set %s = %s", key, str_value)
+        try:
+            from shared.debug_logger import log_audit
+            log_audit("update_setting", "UpdateSettings",
+                      {"key": key, "value": str_value}, caller_ip)
+        except Exception:
+            pass
 
         return func.HttpResponse(
             json.dumps({
@@ -121,7 +128,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error("UpdateSettings: Error updating %s: %s", key, str(e))
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to update setting"}),
             mimetype="application/json",
             status_code=500,
         )

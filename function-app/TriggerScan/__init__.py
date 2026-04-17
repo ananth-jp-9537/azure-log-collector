@@ -28,10 +28,9 @@ def main(req: func.HttpRequest, scanQueue: func.Out[str]) -> func.HttpResponse:
 
     except Exception as e:
         import traceback
-        tb = traceback.format_exc()
-        logging.error("TriggerScan: Error: %s\n%s", str(e), tb)
+        logging.error("TriggerScan: Error: %s\n%s", str(e), traceback.format_exc())
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({"error": "Failed to enqueue scan request"}),
             mimetype="application/json",
             status_code=500,
         )
